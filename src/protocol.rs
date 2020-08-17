@@ -17,6 +17,7 @@ pub enum ZaichikFrame {
 
 // Кодек позволяет нам превратить наш фрейм в байты и обратно.
 // Мы для передачи данных будем использовать бинкод.
+#[derive(Clone)]
 pub struct ZaichikCodec;
 
 impl ZaichikCodec {
