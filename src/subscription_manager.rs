@@ -1,8 +1,14 @@
+use crate::protocol;
 use crate::topic_registry;
+use crate::topic_registry::TopicRegistry;
+use futures::SinkExt;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time;
-
+use tokio::net::tcp::OwnedWriteHalf;
+use tokio::stream::StreamExt;
 // Для сообщений в компоненте, который управляет подпиской мы будем использовать
 // отдельный внутренний тип Message. Он нам нужен для того, чтобы добавить чуть
 // больше гибкости и иметь возможность добавлять к сообщениям дополнительные поля или методы.
@@ -20,16 +26,49 @@ struct Message {
 
 // Наш сабскрипшн менеджер будет асинхронным компонентом, который будет читать из броадкаста
 // и писать в клиентский стрим нужные сообщения, а также он будет вносить правки в разные компоненты
-struct SubscriptionManager {
+pub struct SubscriptionManager {
     message_buffer: MessagesBuffer,
-    // topic_registry: Arc<RWLock<TopicRegistry>>
-    // broadcast_receiver: broadcast::Receiver<Frame>
-    // client_connection: TcpStream
+    topic_registry: Arc<RwLock<TopicRegistry>>,
+    broadcast_receiver: tokio::sync::broadcast::Receiver<protocol::ZaichikFrame>,
+    client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
 }
 
 impl SubscriptionManager {
-    pub fn start_loop() {
-        ()
+    pub async fn start_loop(
+        peer: std::net::SocketAddr,
+        topic_registry: Arc<RwLock<TopicRegistry>>,
+        broadcast_receiver: tokio::sync::broadcast::Receiver<protocol::ZaichikFrame>,
+        client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
+    ) {
+        debug!(
+            "[{}:{}] Starting SubscriptionManager",
+            peer.ip(),
+            peer.port()
+        );
+
+        let mut manager = SubscriptionManager {
+            message_buffer: MessagesBuffer::new(),
+            topic_registry,
+            broadcast_receiver,
+            client_connection,
+        };
+
+        while let Ok(frame) = manager.broadcast_receiver.recv().await {
+            debug!(
+                "[{}:{}] Received broadcast with frame {:?}",
+                peer.ip(),
+                peer.port(),
+                frame
+            );
+            // Todo обработать тут ошибку и завершить подписку когда надо
+            manager.client_connection.send(frame).await;
+        }
+
+        debug!(
+            "[{}:{}] Stopping SubscriptionManager",
+            peer.ip(),
+            peer.port()
+        );
     }
 
     fn send_to_client() {

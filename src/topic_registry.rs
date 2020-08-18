@@ -4,7 +4,7 @@ use std::time;
 type TopicName = String;
 
 pub struct TopicRegistry {
-    topics: HashMap<TopicName, TopicSettings>,
+    pub topics: HashMap<TopicName, TopicSettings>,
 }
 
 #[derive(Clone, Copy, Debug)]
