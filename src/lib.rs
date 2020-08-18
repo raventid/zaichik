@@ -1,6 +1,6 @@
+use futures::SinkExt;
 use std::error::Error;
 use tokio::stream::StreamExt;
-use futures::SinkExt;
 mod protocol;
 
 pub struct Client {
@@ -17,9 +17,7 @@ impl Client {
 
         println!("Established connection to {}", server_addr);
 
-        Ok(Client {
-            stream: framed,
-        })
+        Ok(Client { stream: framed })
     }
 
     pub async fn read_message(&mut self) -> Option<protocol::ZaichikFrame> {
@@ -34,7 +32,7 @@ impl Client {
         let frame = protocol::ZaichikFrame::Subscribe {
             topic: topic.clone(),
         };
-        self.stream.send(frame).await;
+        let _ = self.stream.send(frame).await;
         println!("Tried to send SUBSCRIBE message on topic {}", topic);
     }
 }

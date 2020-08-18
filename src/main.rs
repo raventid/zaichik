@@ -1,8 +1,12 @@
-use tokio;
-use tokio_util;
-use tokio::stream::StreamExt;
+mod subscription_manager;
+mod topic_registry;
+
 use futures::SinkExt;
-#[macro_use] extern crate log;
+use tokio;
+use tokio::stream::StreamExt;
+use tokio_util;
+#[macro_use]
+extern crate log;
 
 mod protocol;
 
@@ -10,7 +14,9 @@ mod protocol;
 async fn main() {
     env_logger::init();
 
-    let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889").await.unwrap();
+    let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889")
+        .await
+        .unwrap();
     debug!("Started broker server at {}", "127.0.0.1:8889".to_string());
 
     loop {
@@ -24,10 +30,7 @@ async fn main() {
     }
 }
 
-async fn process(
-    socket: tokio::net::TcpStream,
-    peer: std::net::SocketAddr,
-) {
+async fn process(socket: tokio::net::TcpStream, peer: std::net::SocketAddr) {
     debug!("New connection from {}:{}", peer.ip(), peer.port());
 
     let codec = protocol::ZaichikCodec::new();
@@ -47,4 +50,3 @@ async fn process(
         }
     }
 }
-
