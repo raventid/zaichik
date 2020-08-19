@@ -1,4 +1,3 @@
-use bytes;
 use serde::{Deserialize, Serialize};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};

@@ -250,42 +250,39 @@ impl MessagesBuffer {
         subscribed_on: &HashSet<topic_registry::TopicName>,
         topic_registry: &Arc<RwLock<topic_registry::TopicRegistry>>,
     ) -> Option<Message> {
-        while self.buffer.len() != 0 {
-            match self.buffer.pop_front() {
-                Some(message) => {
-                    // Если мы не нашли настройки для топика, то проигнорируем сообщение и пойдем дальше.
-                    // Нам имеют право присылать сообщения, которые не привязаны ни к какому существующему
-                    // топику. Такие сообщения начнут потреблять тогда, когда кто-то подпишется на топик
-                    // или создаст его с помощью CreateTopic. Но можно и запретить такое.
-                    let registry = topic_registry.read().unwrap();
-                    let maybe_topic_settings = registry.topics.get(&message.topic);
-                    if maybe_topic_settings.is_none() {
-                        continue;
-                    }
-                    let topic_settings = maybe_topic_settings.unwrap();
-
-                    let not_interested_in = !subscribed_on.contains(&message.topic);
-                    let out_of_date = topic_settings.retention_ttl.is_some()
-                        && Self::message_is_out_of_date(
-                            &message,
-                            topic_settings.retention_ttl.unwrap(),
-                        );
-
-                    let is_duplicate = !not_interested_in
-                        && !out_of_date
-                        && topic_settings.dedup_ttl.is_some()
-                        && self.check_duplicate_and_update_dedup_map(
-                            &message,
-                            topic_settings.dedup_ttl.unwrap(),
-                        );
-
-                    if not_interested_in || out_of_date || is_duplicate {
-                        continue;
-                    } else {
-                        return Some(message);
-                    }
+        while !self.buffer.is_empty() {
+            if let Some(message) = self.buffer.pop_front() {
+                // Если мы не нашли настройки для топика, то проигнорируем сообщение и пойдем дальше.
+                // Нам имеют право присылать сообщения, которые не привязаны ни к какому существующему
+                // топику. Такие сообщения начнут потреблять тогда, когда кто-то подпишется на топик
+                // или создаст его с помощью CreateTopic. Но можно и запретить такое.
+                let registry = topic_registry.read().unwrap();
+                let maybe_topic_settings = registry.topics.get(&message.topic);
+                if maybe_topic_settings.is_none() {
+                    continue;
                 }
-                None => (),
+                let topic_settings = maybe_topic_settings.unwrap();
+
+                let not_interested_in = !subscribed_on.contains(&message.topic);
+                let out_of_date = topic_settings.retention_ttl.is_some()
+                    && Self::message_is_out_of_date(
+                        &message,
+                        topic_settings.retention_ttl.unwrap(),
+                    );
+
+                let is_duplicate = !not_interested_in
+                    && !out_of_date
+                    && topic_settings.dedup_ttl.is_some()
+                    && self.check_duplicate_and_update_dedup_map(
+                        &message,
+                        topic_settings.dedup_ttl.unwrap(),
+                    );
+
+                if not_interested_in || out_of_date || is_duplicate {
+                    continue;
+                } else {
+                    return Some(message);
+                }
             }
         }
 

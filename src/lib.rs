@@ -28,21 +28,48 @@ impl Client {
         }
     }
 
-    pub async fn subscribe_on(&mut self, topic: String) {
+    pub async fn create_topic(
+        &mut self,
+        topic: String,
+        retention_ttl: u64,
+        dedup_ttl: u64,
+    ) -> Result<(), std::io::Error> {
+        let frame = protocol::ZaichikFrame::CreateTopic {
+            topic,
+            retention_ttl,
+            dedup_ttl,
+        };
+
+        self.stream.send(frame).await
+    }
+
+    pub async fn subscribe_on(&mut self, topic: String) -> Result<(), std::io::Error> {
         let frame = protocol::ZaichikFrame::Subscribe {
             topic: topic.clone(),
         };
-        let _ = self.stream.send(frame).await;
-        println!("Tried to send SUBSCRIBE message on topic {}", topic);
+
+        self.stream.send(frame).await
     }
 
-    pub async fn publish(&mut self, topic: String, payload: Vec<u8>) {
+    pub async fn publish(&mut self, topic: String, payload: Vec<u8>) -> Result<(), std::io::Error> {
         let frame = protocol::ZaichikFrame::Publish {
             topic,
             key: Some("secret".to_string()),
             payload,
         };
 
-        self.stream.send(frame).await.unwrap();
+        self.stream.send(frame).await
+    }
+
+    pub async fn commit(&mut self) -> Result<(), std::io::Error> {
+        let frame = protocol::ZaichikFrame::Commit {};
+
+        self.stream.send(frame).await
+    }
+
+    pub async fn close(&mut self) -> Result<(), std::io::Error> {
+        let frame = protocol::ZaichikFrame::CloseConnection {};
+
+        self.stream.send(frame).await
     }
 }

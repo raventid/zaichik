@@ -4,9 +4,7 @@ mod topic_registry;
 
 use crate::topic_registry::TopicRegistry;
 use std::sync::{Arc, RwLock};
-use tokio;
 use tokio::stream::StreamExt;
-use tokio_util;
 
 #[macro_use]
 extern crate log;
@@ -87,9 +85,8 @@ async fn process(
         peer.port()
     );
     let close = protocol::ZaichikFrame::CloseConnection {};
-    broadcast
-        .send(subscription_manager::FrameWrapper::new(close, peer))
-        .unwrap();
+    // Не интересуемся результатом.
+    let _ = broadcast.send(subscription_manager::FrameWrapper::new(close, peer));
 
     debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }
