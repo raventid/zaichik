@@ -35,4 +35,14 @@ impl Client {
         let _ = self.stream.send(frame).await;
         println!("Tried to send SUBSCRIBE message on topic {}", topic);
     }
+
+    pub async fn publish(&mut self, topic: String, payload: Vec<u8>) {
+        let frame = protocol::ZaichikFrame::Publish {
+            topic,
+            key: Some("secret".to_string()),
+            payload
+        };
+
+        self.stream.send(frame).await;
+    }
 }

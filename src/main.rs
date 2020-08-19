@@ -22,13 +22,12 @@ async fn main() {
     let (broadcast, _) = tokio::sync::broadcast::channel(1000);
 
     // База данных топиков, в которой хранятся настройки для каждого из них.
-    let topic_registry = Arc::new(RwLock::new(topic_registry::TopicRegistry {
-        topics: HashMap::new(),
-    }));
+    let topic_registry = Arc::new(RwLock::new(topic_registry::TopicRegistry::new()));
 
     let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889")
         .await
         .unwrap();
+
     debug!("Started broker server at {}", "127.0.0.1:8889".to_string());
 
     loop {
@@ -47,7 +46,7 @@ async fn main() {
 async fn process(
     socket: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
-    broadcast: tokio::sync::broadcast::Sender<protocol::ZaichikFrame>,
+    broadcast: tokio::sync::broadcast::Sender<subscription_manager::FrameWrapper>,
     topic_registry: Arc<RwLock<TopicRegistry>>,
 ) {
     debug!("New connection from {}:{}", peer.ip(), peer.port());
@@ -59,6 +58,7 @@ async fn process(
     let mut writer = tokio_util::codec::FramedWrite::new(write_half, codec);
 
     let broadcast_receiver = broadcast.subscribe();
+
     // Запись в сокет и работу с броадкастом мы отдадим в отдельную задачу
     tokio::spawn(async move {
         subscription_manager::SubscriptionManager::start_loop(
@@ -74,7 +74,8 @@ async fn process(
     while let Some(result) = reader.next().await {
         match result {
             Ok(frame) => {
-                broadcast.send(frame).unwrap();
+                let wrapped_frame = subscription_manager::FrameWrapper::new(frame, peer);
+                broadcast.send(wrapped_frame).unwrap();
             }
             Err(e) => {
                 error!("error on decoding from socket; error = {:?}", e);
@@ -82,5 +83,9 @@ async fn process(
         }
     }
 
-    debug!("Stopping client {}:{}", peer.ip(), peer.port());
+    debug!("[{}:{}] Stopping SubscriptionManager", peer.ip(), peer.port());
+    let close = protocol::ZaichikFrame::CloseConnection {};
+    broadcast.send(subscription_manager::FrameWrapper::new(close, peer)).unwrap();
+
+    debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }

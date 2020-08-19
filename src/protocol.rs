@@ -11,8 +11,24 @@ use tokio_util::codec::{Decoder, Encoder};
 // байтов.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub enum ZaichikFrame {
-    Publish { topic: String, payload: Vec<u8> },
-    Subscribe { topic: String },
+    CreateTopic {
+        topic: String,
+        retention_ttl: u64,
+        dedup_ttl: u64,
+    },
+    Publish {
+        topic: String,
+        key: Option<String>,
+        payload: Vec<u8>,
+    },
+    Subscribe {
+        topic: String,
+    },
+    Unsubscribe {
+        topic: String,
+    },
+    CloseConnection,
+    Commit,
 }
 
 // Кодек позволяет нам превратить наш фрейм в байты и обратно.
@@ -80,6 +96,7 @@ mod tests {
     fn test_frame_encoder_decoder() {
         let frame = ZaichikFrame::Publish {
             topic: String::from("topic"),
+            key: None,
             payload: vec![1, 2, 3, 4, 5],
         };
 
@@ -96,11 +113,13 @@ mod tests {
     fn test_frame_encoder_decoder_on_multiplexed_stream() {
         let frame1 = ZaichikFrame::Publish {
             topic: String::from("topic1"),
+            key: None,
             payload: vec![1, 2, 3, 4, 5],
         };
 
         let frame2 = ZaichikFrame::Publish {
             topic: String::from("topic2"),
+            key: None,
             payload: vec![1, 2, 3, 4, 5],
         };
 
