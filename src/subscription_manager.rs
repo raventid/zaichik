@@ -1,14 +1,11 @@
 use crate::protocol;
 use crate::topic_registry;
-use crate::topic_registry::{TopicRegistry, TopicSettings};
+use crate::topic_registry::TopicRegistry;
 use futures::SinkExt;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::Hash;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::stream::StreamExt;
 
 // Пожалуй здесь мы лучше воспользуемся другой штучкой, мы можем сделать Message структурой,
 // а другие типы сообщений уже сделать энумом, если так хочется. Потому что хранить мы будем
@@ -196,11 +193,14 @@ impl SubscriptionManager {
                         // Отметим, что отправили сообщение, ждем следующего
                         // коммита от пользователя.
                         Ok(_) => {
-                            debug!("[{}:{}] Current lag is {}",
-                                   peer.ip(),
-                                   peer.port(), manager.message_buffer.lag());
+                            debug!(
+                                "[{}:{}] Sent Frame to client || Current lag is {}",
+                                peer.ip(),
+                                peer.port(),
+                                manager.message_buffer.lag()
+                            );
                             manager.waiting_for_next_message = false
-                        },
+                        }
                         Err(e) => info!("{}", e),
                     }
                 }

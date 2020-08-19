@@ -40,9 +40,9 @@ impl Client {
         let frame = protocol::ZaichikFrame::Publish {
             topic,
             key: Some("secret".to_string()),
-            payload
+            payload,
         };
 
-        self.stream.send(frame).await;
+        self.stream.send(frame).await.unwrap();
     }
 }

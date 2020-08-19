@@ -3,8 +3,6 @@ mod subscription_manager;
 mod topic_registry;
 
 use crate::topic_registry::TopicRegistry;
-use futures::SinkExt;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio;
 use tokio::stream::StreamExt;
@@ -55,7 +53,7 @@ async fn process(
     let (read_half, write_half) = socket.into_split();
 
     let mut reader = tokio_util::codec::FramedRead::new(read_half, codec.clone());
-    let mut writer = tokio_util::codec::FramedWrite::new(write_half, codec);
+    let writer = tokio_util::codec::FramedWrite::new(write_half, codec);
 
     let broadcast_receiver = broadcast.subscribe();
 
@@ -83,9 +81,15 @@ async fn process(
         }
     }
 
-    debug!("[{}:{}] Stopping SubscriptionManager", peer.ip(), peer.port());
+    debug!(
+        "[{}:{}] Stopping SubscriptionManager",
+        peer.ip(),
+        peer.port()
+    );
     let close = protocol::ZaichikFrame::CloseConnection {};
-    broadcast.send(subscription_manager::FrameWrapper::new(close, peer)).unwrap();
+    broadcast
+        .send(subscription_manager::FrameWrapper::new(close, peer))
+        .unwrap();
 
     debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }
