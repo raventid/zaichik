@@ -14,12 +14,82 @@
 Это поможет нам избежать некотых сложностей с синхронизацией ресурсов, а так же откроет пространство для
 разных интересных ходов.
 
+## Резюме
+Общий подход, который использовался здесь ориентирован на медленных клиентов, все было сделано для этого.
+А именно, клиент отправляет фрейм подтверждения на каждый запрос, у каждого клиента свой лаг и он видит общий лаг по
+очереди, а не по топику. В рамках одного подключения можно подписаться на любое количество топиков, они мультиплексированы.
+Доступна дедупликация и retention в рамках одного консьюмера. Нет разделения на продьюсер и консьюмер, можно писать и читать свои сообщения.
+
+Реализация с индивидуальными буфферами для каждого потребителя имеет свои преимущества (меньше синхронизировать, проще код писать), но недостатков тоже много.
+Задача сделать общий ретеншн в таком варианте решается сложно и все равно требует дополнительную структуру.
+
+Еще один не самый удачный шаг - это общий броадкаст-канал для всех сообщений. Из-за частых коммитов, он оказывается
+наполовину заполнен сообщениями, которые не интересны большинству потребителей и это не особо эффективно.
+
+## Что можно улучшить
+Общий ретеншн (можно для этого переделать месседж буффер)
+Транзакции вместо коммита одного фрейма.
+Побольше тестов.
+Поменьше копирований и аллокаций.
+Для персональных сообщений клиентам стоит сделать отдельный канал,
+может быть mpsc и смержить его с броадкастом в один стрим.
+Сделать отдельные кодеки для Sink, Stream
+
 
 ## Разработка
 Ход разработки можно смотреть в коммитах к репозиторию, а для ознакомления с исходным кодом можно прочитать комментарии и 
 README.
 
+commit 81b5776d72d485bdb08ab57235b6796a694bad5c
+Date:   Wed Aug 19 04:22:57 2020 +0300
+
+    final version of broker based on broadcast
+    
+    Extended protocl and tied together SubscriptionManager
+    TopicRegistry, Server.
+
+commit 54758472b78af5b6525d7627b7080a956e08c032
+Date:   Tue Aug 18 20:26:57 2020 +0300
+
+    redo echo server with broadcast style
+    
+    In this pull request we are making the first step to wire together
+    our subscription manager and tcp-server. In our case we are just
+    adding broadcast and passing ownership of write part of a tcp stream
+    inside our external manager
+
+commit 76b944ce5dda1d36e7702f7ba053fc4371632de6
+Date:   Tue Aug 18 19:42:20 2020 +0300
+
+    add internal subscriber, message buffer
+    
+    In this commit we are adding a few components which are not
+    tied together yet. We are adding subscriber, message buffer,
+    topic_registry which are the key components for our future
+    system
+
+commit e32a700d5a549cb7883da6fe4eb8ad213e2d30eb
+Date:   Tue Aug 18 02:03:09 2020 +0300
+
+    adds simple framed tcp echo server
+    
+    Also here we are adding examples directory with simple write and read to and
+    from our server. Also here we demonstrate how to split tcp stream into stream
+    and sink parts, so we can separte incoming and outcoming traffic.
+
+commit 084d07bfc71e161e69ff47d97134234a16095e1d
+Date:   Tue Aug 18 00:11:28 2020 +0300
+
+    create custom frame with tokio codec
+
 
 ## Запуск
-
+Чтобы видеть все логи, можно запустить сервер брокера вот так:
+```
 RUST_LOG=debug cargo run
+```
+
+Дальше можно позапускать разные примеры. Например эхо-клиент, который шлет сообщение и получает его сам.
+```
+cargo run --example echo
+```
