@@ -1,11 +1,13 @@
 use crate::protocol;
-use crate::topic_registry;
-use crate::topic_registry::TopicRegistry;
+use crate::topic_controller;
+use crate::topic_controller::TopicRegistry;
 use futures::SinkExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::stream::StreamMap;
+use crate::topic_registry::TopicName;
 
 // FrameWrapper оборачивает Frame, добавляя к нему
 // дополнительную информацию, например кто отправил фрейм,
@@ -32,11 +34,12 @@ impl FrameWrapper {
 // больше гибкости и иметь возможность добавлять к сообщениям дополнительные поля или методы.
 // Это юнит хранения сообщения в MessageBuffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Message {
+pub struct Message {
     topic: String,
     key: Option<String>,
     payload: Vec<u8>,
     received_at: time::Instant,
+    pub expires_at: time::Instant,
 }
 
 // Наш сабскрипшн менеджер будет асинхронным компонентом, который будет читать из броадкаста
@@ -44,7 +47,7 @@ struct Message {
 // Его задача в основном хранить настройки и координировать действия. Логика по фильтрации
 // сообщений находится в MessagesBuffer.
 pub struct SubscriptionManager {
-    subscribed_on: HashSet<topic_registry::TopicName>,
+    subscribed_on: StreamMap<TopicName, tokio::stream::Stream<Item = Result<Message, String>>>,
     message_buffer: MessagesBuffer,
     topic_registry: Arc<RwLock<TopicRegistry>>,
     broadcast_receiver: tokio::sync::broadcast::Receiver<FrameWrapper>,
@@ -102,6 +105,8 @@ impl SubscriptionManager {
                         // Сейчас CreateTopic затирает предыдущие настройки, если кто-то пытается
                         // пересоздать топик. Другим вариантом было бы выдавать на такое ошибку или
                         // игнорировать изменения.
+                        // todo c новым подходом, где мы храним контроллеры, нам уже не стоит так делать
+                        // как мы делали раньше, нам стоит игнорировать команду все-таки.
                         let mut registry = manager.topic_registry.write().unwrap();
                         registry.add_topic(topic, retention_ttl, dedup_ttl);
                     }
@@ -124,7 +129,9 @@ impl SubscriptionManager {
                             topic_registry.add_topic(topic.clone(), 0, 0);
                         }
 
-                        manager.subscribed_on.insert(topic);
+                        let registry = manager.topic_registry.read().unwrap();
+                        let topic_controller = registry.topics.get(&topic).unwrap();
+                        manager.subscribed_on.insert(topic, topic_controller.subscribe());
                     }
                     protocol::ZaichikFrame::Unsubscribe { topic } => {
                         manager.subscribed_on.remove(&topic);
@@ -153,6 +160,7 @@ impl SubscriptionManager {
                             key,
                             payload,
                             received_at: frame.received_at,
+                            expires_at: time::Instant::now(),
                         };
 
                         manager.message_buffer.queue_message(message);
@@ -171,9 +179,9 @@ impl SubscriptionManager {
             // Если наш клиент готов к приму нового сообщения
             // и если какое-то из сообщений доступно, то отправим его.
             if manager.waiting_for_next_message {
-                let message = manager
-                    .message_buffer
-                    .next(&manager.subscribed_on, &manager.topic_registry);
+                // let message = manager
+                //     .message_buffer
+                //     .next(&manager.subscribed_on, &manager.topic_registry);
 
                 // Асинк не всегда удобно писать во вложенном блоке
                 // поэтому иногда приходится писать is_some(), а потом
@@ -247,8 +255,9 @@ impl MessagesBuffer {
 
     fn next(
         &mut self,
-        subscribed_on: &HashSet<topic_registry::TopicName>,
-        topic_registry: &Arc<RwLock<topic_registry::TopicRegistry>>,
+        subscribed_on: &HashSet<topic_controller::TopicName>,
+        // тут пока оставим регистри
+        topic_registry: &Arc<RwLock<crate::topic_registry::TopicRegistry>>,
     ) -> Option<Message> {
         while !self.buffer.is_empty() {
             if let Some(message) = self.buffer.pop_front() {

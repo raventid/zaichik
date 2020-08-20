@@ -1,8 +1,10 @@
 mod protocol;
 mod subscription_manager;
+mod topic_controller;
 mod topic_registry;
 
-use crate::topic_registry::TopicRegistry;
+// use crate::topic_registry::TopicRegistry;
+use crate::topic_controller::TopicRegistry;
 use std::sync::{Arc, RwLock};
 use tokio::stream::StreamExt;
 
@@ -19,7 +21,7 @@ async fn main() {
     let (broadcast, _) = tokio::sync::broadcast::channel(1000);
 
     // База данных топиков, в которой хранятся настройки для каждого из них.
-    let topic_registry = Arc::new(RwLock::new(topic_registry::TopicRegistry::new()));
+    let topic_registry = Arc::new(RwLock::new(TopicRegistry::new()));
 
     let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889")
         .await
