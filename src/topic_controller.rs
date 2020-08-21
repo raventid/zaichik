@@ -113,7 +113,7 @@ impl TopicController {
         }
     }
 
-    pub async fn publish(&mut self, message: Message) {
+    pub fn publish(&mut self, message: Message) {
         // dedup
         // set expiration
         // send_to_topic
@@ -133,7 +133,7 @@ impl TopicController {
 
         // Смещаем курсор на локальном слушателе. Игнорируем ошибку.
         // todo убрать в отдельный tokio::spawn, чтобы снять ограничение на многопоточность
-        let _ = self.receivers.recv().await;
+        // let _ = self.receivers.recv().await;
     }
     // broadcast::Receiver<Message>
     // Объединяем retained сообщнения и канал куда будут поступать сообщения
@@ -143,6 +143,9 @@ impl TopicController {
         let retained_messages = self
             .retained_buffer
             .iter().map(|message| Ok(message.clone())).collect::<Vec<_>>();
+
+        dbg!(self
+            .retained_buffer.clone());
         // let retained_stream = stream::iter(retained_messages);
         let subscription = self.broadcast_sender.subscribe().into_stream();
 

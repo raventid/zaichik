@@ -147,6 +147,7 @@ impl SubscriptionManager {
                         let topic_controller = topic_controller.read().unwrap();
                         let stream = topic_controller.subscribe();
                         // retained_messages.append(&mut retained);
+                        dbg!(topic.clone());
                         topic_streams.insert(topic, Box::pin(stream));
                     }
                     protocol::ZaichikFrame::Unsubscribe { topic } => {
@@ -181,7 +182,7 @@ impl SubscriptionManager {
                             key,
                             payload,
                             received_at: frame.received_at,
-                            expires_at: time::Instant::now(),
+                            expires_at: time::Instant::now() + time::Duration::from_millis(100_000),
                         };
 
                         // Ну кстати, новый дизайн вынуждает нас вначале создать топик, так как
@@ -238,8 +239,8 @@ impl SubscriptionManager {
 
                 dbg!("I am here!");
 
-                if let Some((topic_name, message)) = topic_streams.next(). {
-
+                if let Some((topic_name, message)) = topic_streams.next().await {
+                    dbg!("ENTERED");
                     let unwrapped = message.unwrap();
                     dbg!(unwrapped.clone());
                     // Для отправки сообщения обратно на клиент мы
@@ -266,6 +267,8 @@ impl SubscriptionManager {
                         Err(e) => info!("{}", e),
                     }
                 }
+
+                dbg!("finished");
             }
         }
 
