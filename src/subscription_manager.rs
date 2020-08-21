@@ -144,6 +144,10 @@ impl SubscriptionManager {
                     }
                     protocol::ZaichikFrame::Unsubscribe { topic } => {
                         manager.subscribed_on.remove(&topic);
+
+                        // Удаляем подписку и ее стрим, в этот момент у нас разрушается один из
+                        // ридеров.
+                        topic_streams.remove(&topic);
                         // Если мы отписались от всех подписок в системе,
                         // то полностью очистим буфер сообщений.
                         // Они нам не понадобятся, пока клиент не захочется
@@ -165,12 +169,19 @@ impl SubscriptionManager {
                         // подписаться на новый топик в любой момент и мы хотели бы отдавать ему
                         // все данные, которые у нас есть.
                         let message = Message {
-                            topic,
+                            topic: topic.clone(),
                             key,
                             payload,
                             received_at: frame.received_at,
                             expires_at: time::Instant::now(),
                         };
+
+                        // Ну кстати, новый дизайн вынуждает нас вначале создать топик, так как
+                        // сейчас мы должны обратиться к топик контроллеру и если его нет, то
+                        // мы вынуждены будем его создать.
+                        let mut registry = manager.topic_registry.write().unwrap();
+                        let topic_controller = registry.topics.get_mut(&topic).unwrap();
+                        topic_controller.publish(message.clone());
 
                         manager.message_buffer.queue_message(message);
                     }
