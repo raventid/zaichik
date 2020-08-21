@@ -1,14 +1,15 @@
 use crate::protocol;
 use crate::topic_controller;
-use crate::topic_controller::{TopicRegistry, TopicController};
+use crate::topic_controller::Message;
+use crate::topic_controller::{TopicController, TopicRegistry};
+use crate::topic_registry::TopicName;
 use futures::SinkExt;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::read;
 use std::sync::{Arc, RwLock};
 use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::stream::{Stream, StreamExt, StreamMap};
-use crate::topic_registry::TopicName;
-use std::fs::read;
 
 // FrameWrapper оборачивает Frame, добавляя к нему
 // дополнительную информацию, например кто отправил фрейм,
@@ -30,26 +31,12 @@ impl FrameWrapper {
     }
 }
 
-// Для сообщений в компоненте, который управляет подпиской мы будем использовать
-// отдельный внутренний тип Message. Он нам нужен для того, чтобы добавить чуть
-// больше гибкости и иметь возможность добавлять к сообщениям дополнительные поля или методы.
-// Это юнит хранения сообщения в MessageBuffer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Message {
-    topic: String,
-    key: Option<String>,
-    payload: Vec<u8>,
-    received_at: time::Instant,
-    pub expires_at: time::Instant,
-}
-
 // Наш сабскрипшн менеджер будет асинхронным компонентом, который будет читать из броадкаста
 // и писать в клиентский стрим нужные сообщения.
 // Его задача в основном хранить настройки и координировать действия. Логика по фильтрации
 // сообщений находится в MessagesBuffer.
 pub struct SubscriptionManager {
     subscribed_on: HashSet<String>,
-    message_buffer: MessagesBuffer,
     topic_registry: Arc<RwLock<TopicRegistry>>,
     broadcast_receiver: tokio::sync::broadcast::Receiver<FrameWrapper>,
     client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
@@ -71,7 +58,6 @@ impl SubscriptionManager {
 
         let mut manager = SubscriptionManager {
             subscribed_on: HashSet::new(),
-            message_buffer: MessagesBuffer::new(),
             topic_registry,
             broadcast_receiver,
             client_connection,
@@ -79,8 +65,6 @@ impl SubscriptionManager {
         };
 
         let mut topic_streams = StreamMap::new();
-        // let mut retained_messages: VecDeque<Message> = VecDeque::new();
-
 
         while let Ok(frame) = manager.broadcast_receiver.recv().await {
             debug!(
@@ -90,9 +74,13 @@ impl SubscriptionManager {
                 frame
             );
 
-            debug!("[{}:{}] Current lag: {} || Client is waiting for message: {} || Subscribed on: {:?}",
-                                   peer.ip(),
-                                   peer.port(), manager.message_buffer.lag(), manager.waiting_for_next_message, manager.subscribed_on);
+            debug!(
+                "[{}:{}] Client is waiting for message: {} || Subscribed on: {:?}",
+                peer.ip(),
+                peer.port(),
+                manager.waiting_for_next_message,
+                manager.subscribed_on
+            );
 
             // На старте проекта мне показалось, что возможность видеть коммиты,
             // подписки и любые события адресованные другим клиентам было бы интересно
@@ -116,7 +104,12 @@ impl SubscriptionManager {
                         // registry.create_topic(topic, retention_ttl, dedup_ttl);
 
                         if !Self::topic_exists(&manager.topic_registry, &topic) {
-                            Self::create_topic(&manager.topic_registry, &topic, retention_ttl, dedup_ttl);
+                            Self::create_topic(
+                                &manager.topic_registry,
+                                &topic,
+                                retention_ttl,
+                                dedup_ttl,
+                            );
                         }
                     }
                     protocol::ZaichikFrame::Subscribe { topic } => {
@@ -125,7 +118,6 @@ impl SubscriptionManager {
                         // наш клиент готов получать сообщения.
                         if manager.subscribed_on.is_empty() {
                             manager.waiting_for_next_message = true;
-                            dbg!(manager.waiting_for_next_message);
                         };
 
                         // Если у нас нет такого топика в реестре, то заведем его.
@@ -146,8 +138,6 @@ impl SubscriptionManager {
                         // Добавляем в нашу мапу стримов откуда читаем новый новую подписку.
                         let topic_controller = topic_controller.read().unwrap();
                         let stream = topic_controller.subscribe();
-                        // retained_messages.append(&mut retained);
-                        dbg!(topic.clone());
                         topic_streams.insert(topic, Box::pin(stream));
                     }
                     protocol::ZaichikFrame::Unsubscribe { topic } => {
@@ -173,22 +163,6 @@ impl SubscriptionManager {
                         key,
                         payload,
                     } => {
-                        // Тут нам приходит броадкаст с новым сообщением.
-                        // Мы будем копировать в буфер все сообщения, так как клиент может захотеть
-                        // подписаться на новый топик в любой момент и мы хотели бы отдавать ему
-                        // все данные, которые у нас есть.
-                        let message = Message {
-                            topic: topic.clone(),
-                            key,
-                            payload,
-                            received_at: frame.received_at,
-                            expires_at: time::Instant::now() + time::Duration::from_millis(100_000),
-                        };
-
-                        // Ну кстати, новый дизайн вынуждает нас вначале создать топик, так как
-                        // сейчас мы должны обратиться к топик контроллеру и если его нет, то
-                        // мы вынуждены будем его создать.
-
                         if !Self::topic_exists(&manager.topic_registry, &topic) {
                             Self::create_topic(&manager.topic_registry, &topic, 0, 0)
                         }
@@ -197,9 +171,7 @@ impl SubscriptionManager {
                         let topic_controller = reader.get_topic(topic.to_string()).unwrap();
 
                         let mut topic_controller = topic_controller.write().unwrap();
-                        topic_controller.publish(message.clone());
-
-                        manager.message_buffer.queue_message(message);
+                        topic_controller.publish(key, payload, frame.received_at);
                     }
                     protocol::ZaichikFrame::Commit => {
                         // Просто помечаем, что наш клиент справился с предыдущим
@@ -219,25 +191,11 @@ impl SubscriptionManager {
                 //     .message_buffer
                 //     .next(&manager.subscribed_on, &manager.topic_registry);
 
-                // todo вначале попробуем отправить удержанные сообщения, а только потом
-                // будем читать, подписки и смотртеь, какие новые сообщения нам пришли.
-                // let retained_message = loop {
-                //     if let Some(message) = retained_messages.pop_front() {
-                //         if message.expires_at > time::Instant::now() {
-                //             break Some(message);
-                //         }
-                //     } else {
-                //         break None;
-                //     }
-                // };
-
-                // let message = ;
-
-                // Асинк не всегда удобно писать во вложенном блоке
-                // поэтому иногда приходится писать is_some(), а потом
-                // делать unwrap().
-
-                dbg!("I am here!");
+                debug!(
+                    "[{}:{}] Client ready to receive message",
+                    peer.ip(),
+                    peer.port(),
+                );
 
                 if let Some((topic_name, message)) = topic_streams.next().await {
                     dbg!("ENTERED");
@@ -247,23 +205,22 @@ impl SubscriptionManager {
                     // используем фрейм Publish, можно было бы сделать
                     // разные кодеки для Sink, Stream.
                     let frame = protocol::ZaichikFrame::Publish {
-                        topic: unwrapped.topic,
+                        topic: topic_name,
                         key: unwrapped.key,
                         payload: unwrapped.payload,
                     };
 
+                    debug!(
+                        "[{}:{}] Sending Frame to client || {:?}",
+                        peer.ip(),
+                        peer.port(),
+                        frame.clone(),
+                    );
+
                     match manager.client_connection.send(frame).await {
                         // Отметим, что отправили сообщение, ждем следующего
                         // коммита от пользователя.
-                        Ok(_) => {
-                            debug!(
-                                "[{}:{}] Sent Frame to client || Current lag is {}",
-                                peer.ip(),
-                                peer.port(),
-                                manager.message_buffer.lag()
-                            );
-                            manager.waiting_for_next_message = false
-                        }
+                        Ok(_) => manager.waiting_for_next_message = false,
                         Err(e) => info!("{}", e),
                     }
                 }
@@ -279,15 +236,11 @@ impl SubscriptionManager {
         );
     }
 
+    // Так как мы планируем переходить на mpsc для общения с сервером, то пока,
+    // будем все роутить только одному пиру, а потом удалим этот метод.
+    // и будем читать все из mpsc.
     fn peer_is_me(frame: &FrameWrapper, peer: std::net::SocketAddr) -> bool {
-        match frame.inner {
-            protocol::ZaichikFrame::Publish {
-                topic: _,
-                key: _,
-                payload: _,
-            } => true,
-            _ => frame.send_by == peer,
-        }
+        frame.send_by == peer
     }
 
     fn topic_exists(registry: &Arc<RwLock<TopicRegistry>>, topic: &str) -> bool {
@@ -295,119 +248,22 @@ impl SubscriptionManager {
         reader.topics.contains_key(topic)
     }
 
-    fn create_topic(registry: &Arc<RwLock<TopicRegistry>>, topic: &str, retention_ttl: u64, dedup_ttl: u64) {
+    fn create_topic(
+        registry: &Arc<RwLock<TopicRegistry>>,
+        topic: &str,
+        retention_ttl: u64,
+        dedup_ttl: u64,
+    ) {
         let mut writer = registry.write().unwrap();
         writer.create_topic(topic.clone().parse().unwrap(), retention_ttl, dedup_ttl);
     }
-}
-
-// Внутренний буфер для хранения всех сообщений в которых заинтересован наш клиент.
-// Данный буфер умеет следить за retention, делать dedup в рамках ttl.
-struct MessagesBuffer {
-    buffer: VecDeque<Message>,
-    dedup_map: HashMap<String, time::Instant>,
-}
-
-impl MessagesBuffer {
-    pub fn new() -> MessagesBuffer {
-        MessagesBuffer {
-            buffer: VecDeque::new(),
-            dedup_map: HashMap::new(),
-        }
-    }
-
-    fn queue_message(&mut self, message: Message) {
-        self.buffer.push_back(message)
-    }
-
-    fn next(
-        &mut self,
-        subscribed_on: &HashSet<topic_controller::TopicName>,
-        // тут пока оставим регистри
-        topic_registry: &Arc<RwLock<crate::topic_registry::TopicRegistry>>,
-    ) -> Option<Message> {
-        while !self.buffer.is_empty() {
-            if let Some(message) = self.buffer.pop_front() {
-                // Если мы не нашли настройки для топика, то проигнорируем сообщение и пойдем дальше.
-                // Нам имеют право присылать сообщения, которые не привязаны ни к какому существующему
-                // топику. Такие сообщения начнут потреблять тогда, когда кто-то подпишется на топик
-                // или создаст его с помощью CreateTopic. Но можно и запретить такое.
-                let registry = topic_registry.read().unwrap();
-                let maybe_topic_settings = registry.topics.get(&message.topic);
-                if maybe_topic_settings.is_none() {
-                    continue;
-                }
-                let topic_settings = maybe_topic_settings.unwrap();
-
-                let not_interested_in = !subscribed_on.contains(&message.topic);
-                let out_of_date = topic_settings.retention_ttl.is_some()
-                    && Self::message_is_out_of_date(
-                        &message,
-                        topic_settings.retention_ttl.unwrap(),
-                    );
-
-                let is_duplicate = !not_interested_in
-                    && !out_of_date
-                    && topic_settings.dedup_ttl.is_some()
-                    && self.check_duplicate_and_update_dedup_map(
-                        &message,
-                        topic_settings.dedup_ttl.unwrap(),
-                    );
-
-                if not_interested_in || out_of_date || is_duplicate {
-                    continue;
-                } else {
-                    return Some(message);
-                }
-            }
-        }
-
-        None
-    }
-
-    fn check_duplicate_and_update_dedup_map(
-        &mut self,
-        message: &Message,
-        dedup_ttl: time::Duration,
-    ) -> bool {
-        // Если у сообщения нет ключа для дедупликации, то мы ничего не будет предпринимать
-        if message.key.is_none() {
-            return false;
-        }
-
-        let now = time::Instant::now();
-        let key = message.key.as_ref().unwrap();
-
-        match self.dedup_map.get(key) {
-            Some(last_sent_at) => {
-                let since_last_seen = now.duration_since(*last_sent_at);
-                if since_last_seen < dedup_ttl {
-                    // Если мы отравляли сообщение не так давно,
-                    // то скажем, что текущее сообщение дубликат.
-                    true
-                } else {
-                    // Здесь мы видим, что можем повторить отравку,
-                    // сообщение ушло приличное время назад.
-                    self.dedup_map.insert(key.to_string(), now);
-                    false
-                }
-            }
-            None => {
-                // Мы еще не встречали такого сообщения,
-                // отправим его и пометим, что оно ушло сейчас.
-                self.dedup_map.insert(key.to_string(), now);
-                false
-            }
-        }
-    }
 
     fn message_is_out_of_date(message: &Message, retention_ttl: time::Duration) -> bool {
-        let time_passed = time::Instant::now().duration_since(message.received_at);
-        time_passed > retention_ttl
-    }
-
-    fn lag(&self) -> usize {
-        self.buffer.len()
+        if message.expires_at.is_none() {
+            false
+        } else {
+            time::Instant::now() > message.expires_at.unwrap()
+        }
     }
 }
 
@@ -441,118 +297,5 @@ mod tests {
         buffer.queue_message(message);
         let message = buffer.next(&subscribed_on, &topic_registry);
         assert!(message.is_none())
-    }
-
-    #[test]
-    fn test_dedup_works() {
-        let mut buffer = MessagesBuffer::new();
-        let mut subscribed_on = HashSet::new();
-        subscribed_on.insert("topic_name".to_string());
-        let topic_registry = Arc::new(RwLock::new({
-            let mut r = topic_registry::TopicRegistry::new();
-            r.add_topic("topic_name".to_string(), 0, 5000);
-            r
-        }));
-
-        let in_past = time::Instant::now()
-            .checked_sub(time::Duration::from_millis(5000))
-            .unwrap();
-        let message1 = Message {
-            topic: "topic_name".to_string(),
-            key: Some("same".to_string()),
-            payload: vec![1, 2, 3, 4],
-            received_at: in_past,
-        };
-        let message2 = Message {
-            topic: "topic_name".to_string(),
-            key: Some("same".to_string()),
-            payload: vec![1, 2, 3, 4],
-            received_at: in_past,
-        };
-
-        buffer.queue_message(message1.clone());
-        buffer.queue_message(message2.clone());
-
-        let out1 = buffer.next(&subscribed_on, &topic_registry);
-        let out2 = buffer.next(&subscribed_on, &topic_registry);
-
-        assert_eq!(out1, Some(message1));
-        assert_eq!(out2, None); // Второе сообщение является дубликатом
-    }
-
-    #[test]
-    fn test_do_not_dedup_if_too_much_time_passed() {
-        let mut buffer = MessagesBuffer::new();
-        let mut subscribed_on = HashSet::new();
-        subscribed_on.insert("topic_name".to_string());
-        let topic_registry = Arc::new(RwLock::new({
-            let mut r = topic_registry::TopicRegistry::new();
-            r.add_topic("topic_name".to_string(), 0, 1);
-            r
-        }));
-
-        let in_past = time::Instant::now()
-            .checked_sub(time::Duration::from_millis(5000))
-            .unwrap();
-        let message1 = Message {
-            topic: "topic_name".to_string(),
-            key: Some("same".to_string()),
-            payload: vec![1, 2, 3, 4],
-            received_at: in_past,
-        };
-        let message2 = Message {
-            topic: "topic_name".to_string(),
-            key: Some("same".to_string()),
-            payload: vec![1, 2, 3, 4],
-            received_at: in_past,
-        };
-
-        buffer.queue_message(message1.clone());
-        buffer.queue_message(message2.clone());
-
-        let out1 = buffer.next(&subscribed_on, &topic_registry);
-        // Подождем перед отправкой следующего сообщения, чтобы обновить таблицу дедупликации
-        sleep(Duration::from_millis(500));
-        let out2 = buffer.next(&subscribed_on, &topic_registry);
-
-        assert_eq!(out1, Some(message1));
-        assert_eq!(out2, Some(message2)); // Второе сообщение не дулбикат, прошло много времени
-    }
-
-    #[test]
-    fn test_dedup_works_with_different_keys() {
-        let mut buffer = MessagesBuffer::new();
-        let mut subscribed_on = HashSet::new();
-        subscribed_on.insert("topic_name".to_string());
-        let topic_registry = Arc::new(RwLock::new({
-            let mut r = topic_registry::TopicRegistry::new();
-            r.add_topic("topic_name".to_string(), 0, 5000);
-            r
-        }));
-
-        let in_past = time::Instant::now()
-            .checked_sub(time::Duration::from_millis(5000))
-            .unwrap();
-        let message1 = Message {
-            topic: "topic_name".to_string(),
-            key: Some("same".to_string()),
-            payload: vec![1, 2, 3, 4],
-            received_at: in_past,
-        };
-        let message2 = Message {
-            topic: "topic_name".to_string(),
-            key: Some("different".to_string()),
-            payload: vec![1, 2, 3, 4],
-            received_at: in_past,
-        };
-
-        buffer.queue_message(message1.clone());
-        buffer.queue_message(message2.clone());
-
-        let out1 = buffer.next(&subscribed_on, &topic_registry);
-        let out2 = buffer.next(&subscribed_on, &topic_registry);
-
-        assert_eq!(out1, Some(message1));
-        assert_eq!(out2, Some(message2)); // Второе сообщение прошло, потому что другой ключ
     }
 }
