@@ -1,6 +1,6 @@
 use crate::protocol;
 use crate::topic_controller;
-use crate::topic_controller::TopicRegistry;
+use crate::topic_controller::{TopicRegistry, TopicController};
 use futures::SinkExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
@@ -8,6 +8,7 @@ use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::stream::{Stream, StreamExt, StreamMap};
 use crate::topic_registry::TopicName;
+use std::fs::read;
 
 // FrameWrapper оборачивает Frame, добавляя к нему
 // дополнительную информацию, например кто отправил фрейм,
@@ -78,7 +79,7 @@ impl SubscriptionManager {
         };
 
         let mut topic_streams = StreamMap::new();
-        let mut retained_messages: VecDeque<Message> = VecDeque::new();
+        // let mut retained_messages: VecDeque<Message> = VecDeque::new();
 
 
         while let Ok(frame) = manager.broadcast_receiver.recv().await {
@@ -111,8 +112,12 @@ impl SubscriptionManager {
                         // игнорировать изменения.
                         // todo c новым подходом, где мы храним контроллеры, нам уже не стоит так делать
                         // как мы делали раньше, нам стоит игнорировать команду все-таки.
-                        let mut registry = manager.topic_registry.write().unwrap();
-                        registry.add_topic(topic, retention_ttl, dedup_ttl);
+                        // let mut registry = manager.topic_registry.write().unwrap();
+                        // registry.create_topic(topic, retention_ttl, dedup_ttl);
+
+                        if !Self::topic_exists(&manager.topic_registry, &topic) {
+                            Self::create_topic(&manager.topic_registry, &topic, retention_ttl, dedup_ttl);
+                        }
                     }
                     protocol::ZaichikFrame::Subscribe { topic } => {
                         // Дополняем наш HashSet подписок.
@@ -120,6 +125,7 @@ impl SubscriptionManager {
                         // наш клиент готов получать сообщения.
                         if manager.subscribed_on.is_empty() {
                             manager.waiting_for_next_message = true;
+                            dbg!(manager.waiting_for_next_message);
                         };
 
                         // Если у нас нет такого топика в реестре, то заведем его.
@@ -130,7 +136,7 @@ impl SubscriptionManager {
 
                         if !topic_exists {
                             let mut topic_registry = manager.topic_registry.write().unwrap();
-                            topic_registry.add_topic(topic.clone(), 0, 0);
+                            topic_registry.create_topic(topic.clone(), 0, 0);
                         }
 
                         let registry = manager.topic_registry.read().unwrap();
@@ -138,9 +144,10 @@ impl SubscriptionManager {
                         manager.subscribed_on.insert(topic.clone());
 
                         // Добавляем в нашу мапу стримов откуда читаем новый новую подписку.
-                        let (mut retained, stream) = topic_controller.subscribe();
-                        retained_messages.append(&mut retained);
-                        topic_streams.insert(topic, stream);
+                        let topic_controller = topic_controller.read().unwrap();
+                        let stream = topic_controller.subscribe();
+                        // retained_messages.append(&mut retained);
+                        topic_streams.insert(topic, Box::pin(stream));
                     }
                     protocol::ZaichikFrame::Unsubscribe { topic } => {
                         manager.subscribed_on.remove(&topic);
@@ -148,6 +155,7 @@ impl SubscriptionManager {
                         // Удаляем подписку и ее стрим, в этот момент у нас разрушается один из
                         // ридеров.
                         topic_streams.remove(&topic);
+
                         // Если мы отписались от всех подписок в системе,
                         // то полностью очистим буфер сообщений.
                         // Они нам не понадобятся, пока клиент не захочется
@@ -179,8 +187,15 @@ impl SubscriptionManager {
                         // Ну кстати, новый дизайн вынуждает нас вначале создать топик, так как
                         // сейчас мы должны обратиться к топик контроллеру и если его нет, то
                         // мы вынуждены будем его создать.
-                        let mut registry = manager.topic_registry.write().unwrap();
-                        let topic_controller = registry.topics.get_mut(&topic).unwrap();
+
+                        if !Self::topic_exists(&manager.topic_registry, &topic) {
+                            Self::create_topic(&manager.topic_registry, &topic, 0, 0)
+                        }
+
+                        let reader = manager.topic_registry.read().unwrap();
+                        let topic_controller = reader.get_topic(topic.to_string()).unwrap();
+
+                        let mut topic_controller = topic_controller.write().unwrap();
                         topic_controller.publish(message.clone());
 
                         manager.message_buffer.queue_message(message);
@@ -205,24 +220,28 @@ impl SubscriptionManager {
 
                 // todo вначале попробуем отправить удержанные сообщения, а только потом
                 // будем читать, подписки и смотртеь, какие новые сообщения нам пришли.
-                let retained_message = loop {
-                    if let Some(message) = retained_messages.pop_front() {
-                        if message.expires_at > time::Instant::now() {
-                            break Some(message);
-                        }
-                    } else {
-                        break None;
-                    }
-                };
+                // let retained_message = loop {
+                //     if let Some(message) = retained_messages.pop_front() {
+                //         if message.expires_at > time::Instant::now() {
+                //             break Some(message);
+                //         }
+                //     } else {
+                //         break None;
+                //     }
+                // };
 
                 // let message = ;
 
                 // Асинк не всегда удобно писать во вложенном блоке
                 // поэтому иногда приходится писать is_some(), а потом
                 // делать unwrap().
-                if let Some((topic_name, message)) = topic_streams.next().await {
+
+                dbg!("I am here!");
+
+                if let Some((topic_name, message)) = topic_streams.next(). {
 
                     let unwrapped = message.unwrap();
+                    dbg!(unwrapped.clone());
                     // Для отправки сообщения обратно на клиент мы
                     // используем фрейм Publish, можно было бы сделать
                     // разные кодеки для Sink, Stream.
@@ -266,6 +285,16 @@ impl SubscriptionManager {
             } => true,
             _ => frame.send_by == peer,
         }
+    }
+
+    fn topic_exists(registry: &Arc<RwLock<TopicRegistry>>, topic: &str) -> bool {
+        let reader = registry.read().unwrap();
+        reader.topics.contains_key(topic)
+    }
+
+    fn create_topic(registry: &Arc<RwLock<TopicRegistry>>, topic: &str, retention_ttl: u64, dedup_ttl: u64) {
+        let mut writer = registry.write().unwrap();
+        writer.create_topic(topic.clone().parse().unwrap(), retention_ttl, dedup_ttl);
     }
 }
 
