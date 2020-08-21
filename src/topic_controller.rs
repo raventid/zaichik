@@ -129,15 +129,16 @@ impl TopicController {
         let _ = self.receivers.recv().await;
     }
     // broadcast::Receiver<Message>
-    pub fn subscribe(&self) -> impl tokio::stream::Stream {
+    pub fn subscribe(&self) -> (VecDeque<Message>, broadcast::Receiver<Message>) {
         // todo спереди нужно приклеить retained buffer
         let retained_messages = self
             .retained_buffer
-            .iter()
-            .map(|message| Ok(message.clone()))
-            .collect::<Vec<_>>();
-        let retained_stream = stream::iter(retained_messages);
-        let subscription_stream = self.broadcast_sender.subscribe().into_stream();
-        retained_stream.chain(subscription_stream)
+            .iter().map(|message| message.clone())
+            .collect::<VecDeque<_>>();
+        // let retained_stream = stream::iter(retained_messages);
+        let subscription = self.broadcast_sender.subscribe();
+
+        (retained_messages, subscription)
+        // retained_stream.chain(subscription_stream)
     }
 }

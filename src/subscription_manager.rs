@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::stream::StreamMap;
+use tokio::stream::{Stream, StreamExt, StreamMap};
 use crate::topic_registry::TopicName;
 
 // FrameWrapper оборачивает Frame, добавляя к нему
@@ -47,7 +47,7 @@ pub struct Message {
 // Его задача в основном хранить настройки и координировать действия. Логика по фильтрации
 // сообщений находится в MessagesBuffer.
 pub struct SubscriptionManager {
-    subscribed_on: StreamMap<TopicName, tokio::stream::Stream<Item = Result<Message, String>>>,
+    subscribed_on: HashSet<String>,
     message_buffer: MessagesBuffer,
     topic_registry: Arc<RwLock<TopicRegistry>>,
     broadcast_receiver: tokio::sync::broadcast::Receiver<FrameWrapper>,
@@ -76,6 +76,10 @@ impl SubscriptionManager {
             client_connection,
             waiting_for_next_message: false,
         };
+
+        let mut topic_streams = StreamMap::new();
+        let mut retained_messages: VecDeque<Message> = VecDeque::new();
+
 
         while let Ok(frame) = manager.broadcast_receiver.recv().await {
             debug!(
@@ -131,7 +135,12 @@ impl SubscriptionManager {
 
                         let registry = manager.topic_registry.read().unwrap();
                         let topic_controller = registry.topics.get(&topic).unwrap();
-                        manager.subscribed_on.insert(topic, topic_controller.subscribe());
+                        manager.subscribed_on.insert(topic.clone());
+
+                        // Добавляем в нашу мапу стримов откуда читаем новый новую подписку.
+                        let (mut retained, stream) = topic_controller.subscribe();
+                        retained_messages.append(&mut retained);
+                        topic_streams.insert(topic, stream);
                     }
                     protocol::ZaichikFrame::Unsubscribe { topic } => {
                         manager.subscribed_on.remove(&topic);
@@ -183,10 +192,25 @@ impl SubscriptionManager {
                 //     .message_buffer
                 //     .next(&manager.subscribed_on, &manager.topic_registry);
 
+                // todo вначале попробуем отправить удержанные сообщения, а только потом
+                // будем читать, подписки и смотртеь, какие новые сообщения нам пришли.
+                let retained_message = loop {
+                    if let Some(message) = retained_messages.pop_front() {
+                        if message.expires_at > time::Instant::now() {
+                            break Some(message);
+                        }
+                    } else {
+                        break None;
+                    }
+                };
+
+                // let message = ;
+
                 // Асинк не всегда удобно писать во вложенном блоке
                 // поэтому иногда приходится писать is_some(), а потом
                 // делать unwrap().
-                if message.is_some() {
+                if let Some((topic_name, message)) = topic_streams.next().await {
+
                     let unwrapped = message.unwrap();
                     // Для отправки сообщения обратно на клиент мы
                     // используем фрейм Publish, можно было бы сделать
