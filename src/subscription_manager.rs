@@ -49,7 +49,7 @@ impl MessageWrapper {
 pub struct SubscriptionManager {
     subscribed_on: HashSet<String>,
     topic_registry: Arc<RwLock<TopicRegistry>>,
-    broadcast_receiver: tokio::sync::broadcast::Receiver<MessageWrapper>,
+    commands_receiver: tokio::sync::mpsc::Receiver<MessageWrapper>,
     client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
     waiting_for_next_message: bool,
 }
@@ -58,7 +58,7 @@ impl SubscriptionManager {
     pub async fn start_loop(
         peer: std::net::SocketAddr,
         topic_registry: Arc<RwLock<TopicRegistry>>,
-        broadcast_receiver: tokio::sync::broadcast::Receiver<MessageWrapper>,
+        commands_receiver: tokio::sync::mpsc::Receiver<MessageWrapper>,
         client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
     ) {
         debug!(
@@ -70,7 +70,7 @@ impl SubscriptionManager {
         let mut manager = SubscriptionManager {
             subscribed_on: HashSet::new(),
             topic_registry,
-            broadcast_receiver,
+            commands_receiver,
             client_connection,
             waiting_for_next_message: false,
         };
@@ -83,7 +83,7 @@ impl SubscriptionManager {
         loop {
             let message = tokio::select! {
                 // message
-                Ok(message) = manager.broadcast_receiver.recv() => message,
+                Some(message) = manager.commands_receiver.recv() => message,
                 // Option<(topic_name, result<Message, receive_error>)>
                 Some((topic_name, Ok(message))) = topic_streams.next(), if manager.waiting_for_next_message => MessageWrapper::from_topic_message(topic_name, message),
                 else => break,
@@ -118,7 +118,7 @@ impl SubscriptionManager {
                     // (например: если клиент 123 подписался на топик "Зайцы", то мы можем от него отписаться)
                     // На деле оказалось, что я этой возможностью не пользуюсь, а в канале создается
                     // лишний шум из-за большого количества чужих сообщений.
-                    if peer == send_by {
+
                         match frame {
                             protocol::ZaichikFrame::CreateTopic {
                                 topic,
@@ -202,7 +202,7 @@ impl SubscriptionManager {
                                 break;
                             }
                         };
-                    }
+
                 }
                 MessageWrapper::TopicMessage { topic_name, inner } => {
                     debug!(

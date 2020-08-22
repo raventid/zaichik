@@ -5,6 +5,7 @@ mod topic_registry;
 
 // use crate::topic_registry::TopicRegistry;
 use crate::topic_controller::TopicRegistry;
+use tokio::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use tokio::stream::StreamExt;
 
@@ -14,11 +15,6 @@ extern crate log;
 #[tokio::main]
 async fn main() {
     env_logger::init();
-
-    // Todo уберем глобальный броадкаст отсюда
-    // Основной бродкаст системы. Через него все подписчики будут получать уведомления
-    // о новых сообщениях, изменениях подписок и коммитах.
-    let (broadcast, _) = tokio::sync::broadcast::channel(1000);
 
     // База данных топиков, в которой хранятся настройки для каждого из них.
     let topic_registry = Arc::new(RwLock::new(TopicRegistry::new()));
@@ -32,12 +28,11 @@ async fn main() {
     loop {
         // В peer хранится ip адрес и порт входящего подключения.
         let (socket, peer) = listener.accept().await.unwrap();
-        let broadcast = broadcast.clone();
         let topic_registry = Arc::clone(&topic_registry);
 
         // Для каждого входящего подключения мы будем создавать отдельную задачу.
         tokio::spawn(async move {
-            process(socket, peer, broadcast, topic_registry).await;
+            process(socket, peer, topic_registry).await;
         });
     }
 }
@@ -45,7 +40,6 @@ async fn main() {
 async fn process(
     socket: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
-    broadcast: tokio::sync::broadcast::Sender<subscription_manager::MessageWrapper>,
     topic_registry: Arc<RwLock<TopicRegistry>>,
 ) {
     debug!("New connection from {}:{}", peer.ip(), peer.port());
@@ -56,25 +50,26 @@ async fn process(
     let mut reader = tokio_util::codec::FramedRead::new(read_half, codec.clone());
     let writer = tokio_util::codec::FramedWrite::new(write_half, codec);
 
-    let broadcast_receiver = broadcast.subscribe();
+    // Канал, для того, чтобы отправлять сообщения от клиента в управляющий компонент.
+    let (mut sender, receiver) = mpsc::channel(1000);
 
     // Запись в сокет и работу с броадкастом мы отдадим в отдельную задачу
     tokio::spawn(async move {
         subscription_manager::SubscriptionManager::start_loop(
             peer,
             topic_registry,
-            broadcast_receiver,
+            receiver,
             writer,
         )
         .await
     });
 
-    // Читать фреймы приходящие от клиента из сокета мы будем в этом цикле.
+    // Читаем фреймы, приходящие от клиента из сокета и передаем их в управляющий компонент.
     while let Some(result) = reader.next().await {
         match result {
             Ok(frame) => {
                 let wrapped_frame = subscription_manager::MessageWrapper::from_frame(frame, peer);
-                broadcast.send(wrapped_frame).unwrap();
+                sender.send(wrapped_frame).await.unwrap();
             }
             Err(e) => {
                 error!("error on decoding from socket; error = {:?}", e);
@@ -82,14 +77,8 @@ async fn process(
         }
     }
 
-    debug!(
-        "[{}:{}] Stopping SubscriptionManager",
-        peer.ip(),
-        peer.port()
-    );
-    let close = protocol::ZaichikFrame::CloseConnection {};
-    // Не интересуемся результатом.
-    let _ = broadcast.send(subscription_manager::MessageWrapper::from_frame(close, peer));
+    // Говорим управляющему модулю, что мы больше не работаем с клиентом.
+    let _ = sender.send(subscription_manager::MessageWrapper::from_frame(protocol::ZaichikFrame::CloseConnection {}, peer)).await;
 
     debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }
