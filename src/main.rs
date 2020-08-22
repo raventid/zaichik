@@ -45,7 +45,7 @@ async fn main() {
 async fn process(
     socket: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
-    broadcast: tokio::sync::broadcast::Sender<subscription_manager::FrameWrapper>,
+    broadcast: tokio::sync::broadcast::Sender<subscription_manager::MessageWrapper>,
     topic_registry: Arc<RwLock<TopicRegistry>>,
 ) {
     debug!("New connection from {}:{}", peer.ip(), peer.port());
@@ -73,7 +73,7 @@ async fn process(
     while let Some(result) = reader.next().await {
         match result {
             Ok(frame) => {
-                let wrapped_frame = subscription_manager::FrameWrapper::new(frame, peer);
+                let wrapped_frame = subscription_manager::MessageWrapper::from_frame(frame, peer);
                 broadcast.send(wrapped_frame).unwrap();
             }
             Err(e) => {
@@ -89,7 +89,7 @@ async fn process(
     );
     let close = protocol::ZaichikFrame::CloseConnection {};
     // Не интересуемся результатом.
-    let _ = broadcast.send(subscription_manager::FrameWrapper::new(close, peer));
+    let _ = broadcast.send(subscription_manager::MessageWrapper::from_frame(close, peer));
 
     debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }

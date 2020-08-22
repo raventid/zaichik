@@ -86,12 +86,11 @@ impl TopicSettings {
 
 #[derive(Debug)]
 pub struct TopicController {
-    // Ключ сообщения, время, когда получили сообщение.
-    name: TopicName,                                    // Clone / Sync
-    broadcast_sender: broadcast::Sender<Message>,       // Clone? / Sync?
-    settings: TopicSettings,                            // Copy + Clone / Sync?
-    compaction_map: im::HashMap<String, time::Instant>, // Sync
-    retained_buffer: im::Vector<Message>,               // Sync
+    name: TopicName,
+    broadcast_sender: broadcast::Sender<Message>,
+    settings: TopicSettings,
+    compaction_map: im::HashMap<String, time::Instant>,
+    retained_buffer: im::Vector<Message>,
 }
 
 impl TopicController {

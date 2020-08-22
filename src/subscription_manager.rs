@@ -11,23 +11,34 @@ use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::stream::{Stream, StreamExt, StreamMap};
 
+
 // FrameWrapper оборачивает Frame, добавляя к нему
 // дополнительную информацию, например кто отправил фрейм,
 // и когда он был получен брокером.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrameWrapper {
-    inner: protocol::ZaichikFrame,
-    received_at: time::Instant,
-    send_by: std::net::SocketAddr,
+pub enum MessageWrapper {
+    Frame {
+        inner: protocol::ZaichikFrame,
+        received_at: time::Instant,
+        send_by: std::net::SocketAddr,
+    },
+    TopicMessage {
+        topic_name: String,
+        inner: Message,
+    },
 }
 
-impl FrameWrapper {
-    pub fn new(frame: protocol::ZaichikFrame, peer: std::net::SocketAddr) -> FrameWrapper {
-        FrameWrapper {
+impl MessageWrapper {
+    pub fn from_frame(frame: protocol::ZaichikFrame, peer: std::net::SocketAddr) -> MessageWrapper {
+        MessageWrapper::Frame {
             inner: frame,
             received_at: time::Instant::now(),
             send_by: peer,
         }
+    }
+
+    pub fn from_topic_message(topic_name: String, inner: Message) -> MessageWrapper {
+        MessageWrapper::TopicMessage { topic_name, inner }
     }
 }
 
@@ -38,7 +49,7 @@ impl FrameWrapper {
 pub struct SubscriptionManager {
     subscribed_on: HashSet<String>,
     topic_registry: Arc<RwLock<TopicRegistry>>,
-    broadcast_receiver: tokio::sync::broadcast::Receiver<FrameWrapper>,
+    broadcast_receiver: tokio::sync::broadcast::Receiver<MessageWrapper>,
     client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
     waiting_for_next_message: bool,
 }
@@ -47,7 +58,7 @@ impl SubscriptionManager {
     pub async fn start_loop(
         peer: std::net::SocketAddr,
         topic_registry: Arc<RwLock<TopicRegistry>>,
-        broadcast_receiver: tokio::sync::broadcast::Receiver<FrameWrapper>,
+        broadcast_receiver: tokio::sync::broadcast::Receiver<MessageWrapper>,
         client_connection: tokio_util::codec::FramedWrite<OwnedWriteHalf, protocol::ZaichikCodec>,
     ) {
         debug!(
@@ -64,168 +75,182 @@ impl SubscriptionManager {
             waiting_for_next_message: false,
         };
 
+        // StreamMap<String, Pin<Box<impl Stream<Item=Result<Message, RecvError>>>>>
         let mut topic_streams = StreamMap::new();
 
-        while let Ok(frame) = manager.broadcast_receiver.recv().await {
-            debug!(
-                "[{}:{}] Received broadcast with frame {:?}",
-                peer.ip(),
-                peer.port(),
-                frame
-            );
-
-            debug!(
-                "[{}:{}] Client is waiting for message: {} || Subscribed on: {:?}",
-                peer.ip(),
-                peer.port(),
-                manager.waiting_for_next_message,
-                manager.subscribed_on
-            );
-
-            // На старте проекта мне показалось, что возможность видеть коммиты,
-            // подписки и любые события адресованные другим клиентам было бы интересно
-            // и на этой основе можно было бы реализовать логику внутри обработчика
-            // (например: если клиент 123 подписался на топик "Зайцы", то мы можем от него отписаться)
-            // На деле оказалось, что я этой возможностью не пользуюсь, а в канале создается
-            // лишний шум из-за большого количества чужих сообщений.
-            if Self::peer_is_me(&frame, peer) {
-                match frame.inner {
-                    protocol::ZaichikFrame::CreateTopic {
-                        topic,
-                        retention_ttl,
-                        dedup_ttl,
-                    } => {
-                        // Сейчас CreateTopic затирает предыдущие настройки, если кто-то пытается
-                        // пересоздать топик. Другим вариантом было бы выдавать на такое ошибку или
-                        // игнорировать изменения.
-                        // todo c новым подходом, где мы храним контроллеры, нам уже не стоит так делать
-                        // как мы делали раньше, нам стоит игнорировать команду все-таки.
-                        // let mut registry = manager.topic_registry.write().unwrap();
-                        // registry.create_topic(topic, retention_ttl, dedup_ttl);
-
-                        if !Self::topic_exists(&manager.topic_registry, &topic) {
-                            Self::create_topic(
-                                &manager.topic_registry,
-                                &topic,
-                                retention_ttl,
-                                dedup_ttl,
-                            );
-                        }
-                    }
-                    protocol::ZaichikFrame::Subscribe { topic } => {
-                        // Дополняем наш HashSet подписок.
-                        // Если это наша первая подписка, то отметим, что
-                        // наш клиент готов получать сообщения.
-                        if manager.subscribed_on.is_empty() {
-                            manager.waiting_for_next_message = true;
-                        };
-
-                        // Если у нас нет такого топика в реестре, то заведем его.
-                        let topic_exists = {
-                            let registry = manager.topic_registry.read().unwrap();
-                            registry.topics.contains_key(&topic)
-                        };
-
-                        if !topic_exists {
-                            let mut topic_registry = manager.topic_registry.write().unwrap();
-                            topic_registry.create_topic(topic.clone(), 0, 0);
-                        }
-
-                        let registry = manager.topic_registry.read().unwrap();
-                        let topic_controller = registry.topics.get(&topic).unwrap();
-                        manager.subscribed_on.insert(topic.clone());
-
-                        // Добавляем в нашу мапу стримов откуда читаем новый новую подписку.
-                        let topic_controller = topic_controller.read().unwrap();
-                        let stream = topic_controller.subscribe();
-                        topic_streams.insert(topic, Box::pin(stream));
-                    }
-                    protocol::ZaichikFrame::Unsubscribe { topic } => {
-                        manager.subscribed_on.remove(&topic);
-
-                        // Удаляем подписку и ее стрим, в этот момент у нас разрушается один из
-                        // ридеров.
-                        topic_streams.remove(&topic);
-
-                        // Если мы отписались от всех подписок в системе,
-                        // то полностью очистим буфер сообщений.
-                        // Они нам не понадобятся, пока клиент не захочется
-                        // подписаться на что-нибудь новое.
-
-                        // UPD: Решил пойти по пути хранения всех сообщений и дальше.
-                        // Не будем удалять.
-                        // if manager.subscribed_on.is_empty() {
-                        //     manager.message_buffer = MessagesBuffer::new();
-                        // }
-                    }
-                    protocol::ZaichikFrame::Publish {
-                        topic,
-                        key,
-                        payload,
-                    } => {
-                        if !Self::topic_exists(&manager.topic_registry, &topic) {
-                            Self::create_topic(&manager.topic_registry, &topic, 0, 0)
-                        }
-
-                        let reader = manager.topic_registry.read().unwrap();
-                        let topic_controller = reader.get_topic(topic.to_string()).unwrap();
-
-                        let mut topic_controller = topic_controller.write().unwrap();
-                        topic_controller.publish(key, payload, frame.received_at);
-                    }
-                    protocol::ZaichikFrame::Commit => {
-                        // Просто помечаем, что наш клиент справился с предыдущим
-                        // сообщением и готов к приему нового.
-                        manager.waiting_for_next_message = true;
-                    }
-                    protocol::ZaichikFrame::CloseConnection => {
-                        break;
-                    }
-                }
+        // Обрабатываем, как команды от управляющего потока, так и то, что нам прилетает из
+        // мультиплексированного стрима всех подписок на топики.
+        loop {
+            let message = tokio::select! {
+                // message
+                Ok(message) = manager.broadcast_receiver.recv() => message,
+                // Option<(topic_name, result<Message, receive_error>)>
+                Some((topic_name, Ok(message))) = topic_streams.next(), if manager.waiting_for_next_message => MessageWrapper::from_topic_message(topic_name, message),
+                else => break,
             };
 
-            // Если наш клиент готов к приму нового сообщения
-            // и если какое-то из сообщений доступно, то отправим его.
-            if manager.waiting_for_next_message {
-                // let message = manager
-                //     .message_buffer
-                //     .next(&manager.subscribed_on, &manager.topic_registry);
-
-                debug!(
-                    "[{}:{}] Client ready to receive message",
-                    peer.ip(),
-                    peer.port(),
-                );
-
-                if let Some((topic_name, message)) = topic_streams.next().await {
-                    dbg!("ENTERED");
-                    let unwrapped = message.unwrap();
-                    dbg!(unwrapped.clone());
-                    // Для отправки сообщения обратно на клиент мы
-                    // используем фрейм Publish, можно было бы сделать
-                    // разные кодеки для Sink, Stream.
-                    let frame = protocol::ZaichikFrame::Publish {
-                        topic: topic_name,
-                        key: unwrapped.key,
-                        payload: unwrapped.payload,
-                    };
+            match message {
+                MessageWrapper::Frame {
+                    inner,
+                    received_at,
+                    send_by,
+                } => {
+                    let frame = inner;
 
                     debug!(
-                        "[{}:{}] Sending Frame to client || {:?}",
+                        "[{}:{}] Received broadcast with frame {:?}",
                         peer.ip(),
                         peer.port(),
-                        frame.clone(),
+                        frame
                     );
 
-                    match manager.client_connection.send(frame).await {
-                        // Отметим, что отправили сообщение, ждем следующего
-                        // коммита от пользователя.
-                        Ok(_) => manager.waiting_for_next_message = false,
-                        Err(e) => info!("{}", e),
+                    debug!(
+                        "[{}:{}] Client is waiting for message: {} || Subscribed on: {:?}",
+                        peer.ip(),
+                        peer.port(),
+                        manager.waiting_for_next_message,
+                        manager.subscribed_on
+                    );
+
+                    // На старте проекта мне показалось, что возможность видеть коммиты,
+                    // подписки и любые события адресованные другим клиентам было бы интересно
+                    // и на этой основе можно было бы реализовать логику внутри обработчика
+                    // (например: если клиент 123 подписался на топик "Зайцы", то мы можем от него отписаться)
+                    // На деле оказалось, что я этой возможностью не пользуюсь, а в канале создается
+                    // лишний шум из-за большого количества чужих сообщений.
+                    if peer == send_by {
+                        match frame {
+                            protocol::ZaichikFrame::CreateTopic {
+                                topic,
+                                retention_ttl,
+                                dedup_ttl,
+                            } => {
+                                // Сейчас CreateTopic затирает предыдущие настройки, если кто-то пытается
+                                // пересоздать топик. Другим вариантом было бы выдавать на такое ошибку или
+                                // игнорировать изменения.
+                                // todo c новым подходом, где мы храним контроллеры, нам уже не стоит так делать
+                                // как мы делали раньше, нам стоит игнорировать команду все-таки.
+                                // let mut registry = manager.topic_registry.write().unwrap();
+                                // registry.create_topic(topic, retention_ttl, dedup_ttl);
+
+                                if !Self::topic_exists(&manager.topic_registry, &topic) {
+                                    Self::create_topic(
+                                        &manager.topic_registry,
+                                        &topic,
+                                        retention_ttl,
+                                        dedup_ttl,
+                                    );
+                                }
+                            }
+                            protocol::ZaichikFrame::Subscribe { topic } => {
+                                // Дополняем наш HashSet подписок.
+                                // Если это наша первая подписка, то отметим, что
+                                // наш клиент готов получать сообщения.
+                                if manager.subscribed_on.is_empty() {
+                                    manager.waiting_for_next_message = true;
+                                };
+
+                                // Если у нас нет такого топика в реестре, то заведем его.
+                                let topic_exists = {
+                                    let registry = manager.topic_registry.read().unwrap();
+                                    registry.topics.contains_key(&topic)
+                                };
+
+                                if !topic_exists {
+                                    let mut topic_registry =
+                                        manager.topic_registry.write().unwrap();
+                                    topic_registry.create_topic(topic.clone(), 0, 0);
+                                }
+
+                                let registry = manager.topic_registry.read().unwrap();
+                                let topic_controller = registry.topics.get(&topic).unwrap();
+                                manager.subscribed_on.insert(topic.clone());
+
+                                // Добавляем в нашу мапу стримов откуда читаем новый новую подписку.
+                                let topic_controller = topic_controller.read().unwrap();
+                                let stream = topic_controller.subscribe();
+                                topic_streams.insert(topic, Box::pin(stream));
+                            }
+                            protocol::ZaichikFrame::Unsubscribe { topic } => {
+                                manager.subscribed_on.remove(&topic);
+
+                                // Удаляем подписку и ее стрим, в этот момент у нас разрушается один из
+                                // ридеров.
+                                topic_streams.remove(&topic);
+                            }
+                            protocol::ZaichikFrame::Publish {
+                                topic,
+                                key,
+                                payload,
+                            } => {
+                                if !Self::topic_exists(&manager.topic_registry, &topic) {
+                                    Self::create_topic(&manager.topic_registry, &topic, 0, 0)
+                                }
+
+                                let reader = manager.topic_registry.read().unwrap();
+                                let topic_controller = reader.get_topic(topic.to_string()).unwrap();
+
+                                let mut topic_controller = topic_controller.write().unwrap();
+                                topic_controller.publish(key, payload, received_at);
+                            }
+                            protocol::ZaichikFrame::Commit => {
+                                // Просто помечаем, что наш клиент справился с предыдущим
+                                // сообщением и готов к приему нового.
+                                manager.waiting_for_next_message = true;
+                            }
+                            protocol::ZaichikFrame::CloseConnection => {
+                                break;
+                            }
+                        };
                     }
                 }
+                MessageWrapper::TopicMessage { topic_name, inner } => {
+                    debug!(
+                        "[{}:{}] Client is ready to receive message",
+                        peer.ip(),
+                        peer.port(),
+                    );
 
-                dbg!("finished");
+                    let message = inner;
+
+                    if !Self::message_is_out_of_date(&message) {
+                        // Для отправки сообщения обратно на клиент мы
+                        // используем фрейм Publish, можно было бы сделать
+                        // разные кодеки для Sink, Stream.
+                        let frame = protocol::ZaichikFrame::Publish {
+                            topic: topic_name,
+                            key: message.key,
+                            payload: message.payload,
+                        };
+
+                        debug!(
+                            "[{}:{}] Sending Frame to client || {:?}",
+                            peer.ip(),
+                            peer.port(),
+                            frame.clone(),
+                        );
+
+                        match manager.client_connection.send(frame).await {
+                            // Отметим, что отправили сообщение, ждем следующего
+                            // коммита от пользователя.
+                            Ok(_) => manager.waiting_for_next_message = false,
+                            Err(e) => info!(
+                                "[{}:{}] TCP connection error:  {}",
+                                peer.ip(),
+                                peer.port(),
+                                e,
+                            ),
+                        }
+
+                        debug!("[{}:{}] Frame sending handled", peer.ip(), peer.port(),);
+                    } else {
+                        debug!(
+                            "[{}:{}] Frame is out of date, skipping",
+                            peer.ip(),
+                            peer.port()
+                        )
+                    }
+                }
             }
         }
 
@@ -234,13 +259,6 @@ impl SubscriptionManager {
             peer.ip(),
             peer.port()
         );
-    }
-
-    // Так как мы планируем переходить на mpsc для общения с сервером, то пока,
-    // будем все роутить только одному пиру, а потом удалим этот метод.
-    // и будем читать все из mpsc.
-    fn peer_is_me(frame: &FrameWrapper, peer: std::net::SocketAddr) -> bool {
-        frame.send_by == peer
     }
 
     fn topic_exists(registry: &Arc<RwLock<TopicRegistry>>, topic: &str) -> bool {
@@ -258,7 +276,7 @@ impl SubscriptionManager {
         writer.create_topic(topic.clone().parse().unwrap(), retention_ttl, dedup_ttl);
     }
 
-    fn message_is_out_of_date(message: &Message, retention_ttl: time::Duration) -> bool {
+    fn message_is_out_of_date(message: &Message) -> bool {
         if message.expires_at.is_none() {
             false
         } else {
