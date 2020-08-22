@@ -3,7 +3,6 @@ mod subscription_manager;
 mod topic_controller;
 mod topic_registry;
 
-// use crate::topic_registry::TopicRegistry;
 use crate::topic_registry::TopicRegistry;
 use std::sync::{Arc, RwLock};
 use tokio::stream::StreamExt;
@@ -16,7 +15,7 @@ extern crate log;
 async fn main() {
     env_logger::init();
 
-    // База данных топиков, в которой хранятся настройки для каждого из них.
+    // База данных топиков, в которой хранятся ссылки на контроллеры топиков.
     let topic_registry = Arc::new(RwLock::new(TopicRegistry::new()));
 
     let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889")
