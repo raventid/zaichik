@@ -1,10 +1,13 @@
 mod protocol;
 mod subscription_manager;
+mod topic_controller;
 mod topic_registry;
 
+// use crate::topic_registry::TopicRegistry;
 use crate::topic_registry::TopicRegistry;
 use std::sync::{Arc, RwLock};
 use tokio::stream::StreamExt;
+use tokio::sync::mpsc;
 
 #[macro_use]
 extern crate log;
@@ -13,12 +16,8 @@ extern crate log;
 async fn main() {
     env_logger::init();
 
-    // Основной бродкаст системы. Через него все подписчики будут получать уведомления
-    // о новых сообщениях, изменениях подписок и коммитах.
-    let (broadcast, _) = tokio::sync::broadcast::channel(1000);
-
     // База данных топиков, в которой хранятся настройки для каждого из них.
-    let topic_registry = Arc::new(RwLock::new(topic_registry::TopicRegistry::new()));
+    let topic_registry = Arc::new(RwLock::new(TopicRegistry::new()));
 
     let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889")
         .await
@@ -29,12 +28,11 @@ async fn main() {
     loop {
         // В peer хранится ip адрес и порт входящего подключения.
         let (socket, peer) = listener.accept().await.unwrap();
-        let broadcast = broadcast.clone();
         let topic_registry = Arc::clone(&topic_registry);
 
         // Для каждого входящего подключения мы будем создавать отдельную задачу.
         tokio::spawn(async move {
-            process(socket, peer, broadcast, topic_registry).await;
+            process(socket, peer, topic_registry).await;
         });
     }
 }
@@ -42,7 +40,6 @@ async fn main() {
 async fn process(
     socket: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
-    broadcast: tokio::sync::broadcast::Sender<subscription_manager::FrameWrapper>,
     topic_registry: Arc<RwLock<TopicRegistry>>,
 ) {
     debug!("New connection from {}:{}", peer.ip(), peer.port());
@@ -53,25 +50,29 @@ async fn process(
     let mut reader = tokio_util::codec::FramedRead::new(read_half, codec.clone());
     let writer = tokio_util::codec::FramedWrite::new(write_half, codec);
 
-    let broadcast_receiver = broadcast.subscribe();
+    // Канал, для того, чтобы отправлять сообщения от клиента в управляющий компонент.
+    let (mut subscription_manager_channel, commands_receiver) = mpsc::channel(1000);
 
-    // Запись в сокет и работу с броадкастом мы отдадим в отдельную задачу
+    // Запись в сокет и управление подписками мы отдадим в отдельную задачу.
     tokio::spawn(async move {
         subscription_manager::SubscriptionManager::start_loop(
             peer,
             topic_registry,
-            broadcast_receiver,
+            commands_receiver,
             writer,
         )
         .await
     });
 
-    // Читать фреймы приходящие от клиента из сокета мы будем в этом цикле.
+    // Читаем фреймы, приходящие от клиента из сокета и передаем их в управляющий компонент.
     while let Some(result) = reader.next().await {
         match result {
             Ok(frame) => {
-                let wrapped_frame = subscription_manager::FrameWrapper::new(frame, peer);
-                broadcast.send(wrapped_frame).unwrap();
+                let wrapped_frame = subscription_manager::MessageWrapper::from_frame(frame);
+                subscription_manager_channel
+                    .send(wrapped_frame)
+                    .await
+                    .unwrap();
             }
             Err(e) => {
                 error!("error on decoding from socket; error = {:?}", e);
@@ -79,14 +80,12 @@ async fn process(
         }
     }
 
-    debug!(
-        "[{}:{}] Stopping SubscriptionManager",
-        peer.ip(),
-        peer.port()
-    );
-    let close = protocol::ZaichikFrame::CloseConnection {};
-    // Не интересуемся результатом.
-    let _ = broadcast.send(subscription_manager::FrameWrapper::new(close, peer));
+    // Говорим управляющему модулю, что мы больше не работаем с клиентом.
+    let _ = subscription_manager_channel
+        .send(subscription_manager::MessageWrapper::from_frame(
+            protocol::ZaichikFrame::CloseConnection {},
+        ))
+        .await;
 
     debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }
