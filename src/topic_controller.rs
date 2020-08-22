@@ -102,6 +102,8 @@ impl TopicController {
         };
 
         if !is_duplicate {
+            // Отправляем сообщение в броадкаст, его прочитают, если у нас есть
+            // подписчики.
             match self.broadcast_sender.send(message.clone()) {
                 Ok(count_subscribers) => debug!(
                     "[TopicController:{}] Sent to {} subscribers",
@@ -112,24 +114,49 @@ impl TopicController {
                     self.name,
                 ),
             };
+
+            // Если мы поддерживаем retention, то сохраним сообщение
+            // в локальный буффер для таких сообщений.
+            if self.settings.retention_ttl.is_some() {
+                self.retained_buffer.push(message);
+            }
         }
 
         // Пройдемся по буфферу и оставим только те элементы, которые
         // все еще не истекли по времени. Такую работу не очень хорошо
         // делать на каждом publish сообщения, но мы позволим себе этот
-        // ход для упрощения.
+        // ход для упрощения. Также здесь мы добавим текущее сообщение в
+        // retention_buffer.
+        self.clean_outdated_retentioned_messages();
+
+        // Также, если мы используем compaction для топика, то мы не хотели
+        // бы бесконечно увеличивать размер хэшмапы. Мы наивно будет удалять
+        // ключи, которые уже точно устарели, что не является очень
+        // эффективной и удачной операцией в publish, но в целях упрощения мы оставим
+        // этот код здесь.
+        // Можно было выполнять эту операцию раз в 1000 паблишей, но мы также не будем
+        // усложнять приведенный код.
+        self.clean_outdated_compaction_keys();
+    }
+
+    fn clean_outdated_compaction_keys(&mut self) {
+        let outdated_keys = self
+            .compaction_map
+            .iter()
+            .filter(|(_key, time)| **time > time::Instant::now())
+            .map(|(key, _val)| key.to_string())
+            .collect::<Vec<_>>();
+
+        for key in outdated_keys {
+            self.compaction_map.remove(&key);
+        }
+    }
+
+    fn clean_outdated_retentioned_messages(&mut self) {
         if self.settings.retention_ttl.is_some() {
             self.retained_buffer
                 .retain(|message| message.expires_at.unwrap() > time::Instant::now());
         }
-
-        // Также, если мы используем compaction для топика, то мы хотели
-        // бы не бесконечно увеличивать размер хэшмапы. Мы наивно будет удалять
-        // удалять ключи, которые уже точно устарели, что не является очень
-        // эффективной и удачной операцией в publish, но для упрощения мы оставим
-        // этот код здесь.
-
-        self.retained_buffer.push(message);
     }
 
     // Объединяем retained сообщения и канал Receiver, куда будут поступать сообщения.
@@ -190,9 +217,6 @@ impl TopicController {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_initializing_topic_settings_with_default() {}
 
     #[test]
     fn test_dedup_works() {

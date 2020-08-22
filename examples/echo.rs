@@ -8,7 +8,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     client.subscribe_on("hello".to_string()).await?;
 
     client
-        .publish("hello".to_string(), "message".to_string().into_bytes())
+        .publish(
+            "hello".to_string(),
+            Some("key".to_string()),
+            "message".to_string().into_bytes(),
+        )
         .await?;
 
     let result = client.read_message().await?;

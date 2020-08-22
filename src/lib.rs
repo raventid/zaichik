@@ -47,10 +47,15 @@ impl Client {
         self.stream.send(frame).await
     }
 
-    pub async fn publish(&mut self, topic: String, payload: Vec<u8>) -> Result<(), std::io::Error> {
+    pub async fn publish(
+        &mut self,
+        topic: String,
+        key: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<(), std::io::Error> {
         let frame = protocol::ZaichikFrame::Publish {
             topic,
-            key: Some("secret".to_string()),
+            key,
             payload,
         };
 
