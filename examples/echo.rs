@@ -3,7 +3,12 @@ use zaichik;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut client = zaichik::Client::connect("127.0.0.1:8889").await?;
+    let port = std::env::vars()
+        .find(|(key, _value)| key == "PORT")
+        .map(|(_key, value)| value)
+        .unwrap_or_else(|| "8889".to_string());
+
+    let mut client = zaichik::Client::connect(&format!("127.0.0.1:{}", port)).await?;
 
     client.subscribe_on("hello".to_string()).await?;
 

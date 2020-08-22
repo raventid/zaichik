@@ -76,10 +76,12 @@ impl SubscriptionManager {
         // мультиплексированного стрима всех подписок на топики.
         loop {
             let message = tokio::select! {
-                // message
                 Some(message) = manager.commands_receiver.recv() => message,
-                // Option<(topic_name, result<Message, receive_error>)>
-                Some((topic_name, Ok(message))) = subscriptions.next(), if manager.waiting_for_next_message => MessageWrapper::from_topic_message(topic_name, message),
+
+                Some((topic_name, Ok(message))) = subscriptions.next(),
+                   if manager.waiting_for_next_message =>
+                     MessageWrapper::from_topic_message(topic_name, message),
+
                 else => break,
             };
 

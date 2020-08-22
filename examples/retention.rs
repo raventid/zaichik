@@ -3,7 +3,12 @@ use zaichik;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut producer = zaichik::Client::connect("127.0.0.1:8889").await?;
+    let port = std::env::vars()
+        .find(|(key, _value)| key == "PORT")
+        .map(|(_key, value)| value)
+        .unwrap_or_else(|| "8889".to_string());
+
+    let mut producer = zaichik::Client::connect(&format!("127.0.0.1:{}", port)).await?;
 
     producer
         .create_topic("hello".to_string(), 10_000, 0)
@@ -18,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     // Подключаемся уже после отправки сообщения продьюсером.
-    let mut consumer = zaichik::Client::connect("127.0.0.1:8889").await?;
+    let mut consumer = zaichik::Client::connect(&format!("127.0.0.1:{}", port)).await?;
 
     consumer.subscribe_on("hello".to_string()).await?;
 

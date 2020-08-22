@@ -15,14 +15,19 @@ extern crate log;
 async fn main() {
     env_logger::init();
 
+    let port = std::env::vars()
+        .find(|(key, _value)| key == "PORT")
+        .map(|(_key, value)| value)
+        .unwrap_or_else(|| "8889".to_string());
+
     // База данных топиков, в которой хранятся ссылки на контроллеры топиков.
     let topic_registry = Arc::new(RwLock::new(TopicRegistry::new()));
 
-    let mut listener = tokio::net::TcpListener::bind("127.0.0.1:8889")
+    let mut listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
         .unwrap();
 
-    debug!("Started broker server at {}", "127.0.0.1:8889".to_string());
+    debug!("Started broker server at 127.0.0.1:{}", port);
 
     loop {
         // В peer хранится ip адрес и порт входящего подключения.
