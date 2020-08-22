@@ -28,12 +28,12 @@ impl Client {
         &mut self,
         topic: String,
         retention_ttl: u64,
-        dedup_ttl: u64,
+        compaction_window: u64,
     ) -> Result<(), std::io::Error> {
         let frame = protocol::ZaichikFrame::CreateTopic {
             topic,
             retention_ttl,
-            dedup_ttl,
+            compaction_window,
         };
 
         self.stream.send(frame).await

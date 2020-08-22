@@ -6,9 +6,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut producer = zaichik::Client::connect("127.0.0.1:8889").await?;
     let mut consumer = zaichik::Client::connect("127.0.0.1:8889").await?;
 
-    producer
-        .create_topic("hello".to_string(), 0, 0)
-        .await?;
+    producer.create_topic("hello".to_string(), 0, 0).await?;
 
     // Запишем в hello 100 сообщений
     for _ in 0..100 {

@@ -13,7 +13,7 @@ pub enum ZaichikFrame {
     CreateTopic {
         topic: String,
         retention_ttl: u64,
-        dedup_ttl: u64,
+        compaction_window: u64,
     },
     Publish {
         topic: String,

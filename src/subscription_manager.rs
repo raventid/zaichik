@@ -7,9 +7,11 @@ use std::time;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::stream::{StreamExt, StreamMap};
 
-// FrameWrapper оборачивает Frame, добавляя к нему
-// дополнительную информацию, например кто отправил фрейм,
-// и когда он был получен брокером.
+// MessageWrapper оборачивает Frame или сообщение от топика Topic, добавляя к нему
+// дополнительную информацию, например, когда он был получен брокером. Создан
+// он для того, чтобы быть общим форматом сообщения для обработки в tokio::select!,
+// который мы используем для выбора между обработкой командного сообщения от клиента (Subscribe, CreateTopic)
+// или сообщения от топика, которое нужно оптравить клиенту.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageWrapper {
     Frame {
@@ -40,8 +42,7 @@ impl MessageWrapper {
 
 // Наш сабскрипшн менеджер будет асинхронным компонентом, который будет читать из броадкаста
 // и писать в клиентский стрим нужные сообщения.
-// Его задача в основном хранить настройки и координировать действия. Логика по фильтрации
-// сообщений находится в MessagesBuffer.
+// Его задача в основном хранить настройки и координировать действия.
 pub struct SubscriptionManager {
     topic_registry: Arc<RwLock<TopicRegistry>>,
     commands_receiver: tokio::sync::mpsc::Receiver<MessageWrapper>,
@@ -69,7 +70,6 @@ impl SubscriptionManager {
             waiting_for_next_message: false,
         };
 
-        // StreamMap<String, Pin<Box<impl Stream<Item=Result<Message, RecvError>>>>>
         let mut subscriptions = StreamMap::new();
 
         // Обрабатываем, как команды от управляющего потока, так и то, что нам прилетает из
@@ -84,41 +84,29 @@ impl SubscriptionManager {
             };
 
             match message {
+                // Эта ветка обрабатывает команды от клиента.
                 MessageWrapper::Frame { frame, received_at } => {
                     debug!(
-                        "[{}:{}] Received broadcast with frame {:?}",
+                        "[{}:{}] Received broadcast with frame {:?} || Waiting for message: {} || Subscribed on: {:?}",
                         peer.ip(),
                         peer.port(),
-                        frame
-                    );
-
-                    debug!(
-                        "[{}:{}] Client is waiting for message: {} || Subscribed on: {:?}",
-                        peer.ip(),
-                        peer.port(),
+                        frame,
                         manager.waiting_for_next_message,
-                        subscriptions.keys().collect::<Vec<_>>(),
+                        subscriptions.keys().collect::<Vec<_>>()
                     );
-
-                    // На старте проекта мне показалось, что возможность видеть коммиты,
-                    // подписки и любые события адресованные другим клиентам было бы интересно
-                    // и на этой основе можно было бы реализовать логику внутри обработчика
-                    // (например: если клиент 123 подписался на топик "Зайцы", то мы можем от него отписаться)
-                    // На деле оказалось, что я этой возможностью не пользуюсь, а в канале создается
-                    // лишний шум из-за большого количества чужих сообщений.
 
                     match frame {
                         protocol::ZaichikFrame::CreateTopic {
                             topic,
                             retention_ttl,
-                            dedup_ttl,
+                            compaction_window,
                         } => {
                             if !Self::topic_exists(&manager.topic_registry, &topic) {
                                 Self::create_topic(
                                     &manager.topic_registry,
                                     &topic,
                                     retention_ttl,
-                                    dedup_ttl,
+                                    compaction_window,
                                 );
                             }
                         }
@@ -132,7 +120,7 @@ impl SubscriptionManager {
                             // Если у нас нет такого топика, то заведем его с настройками
                             // по умолчанию.
                             if !Self::topic_exists(&manager.topic_registry, &topic) {
-                                Self::create_topic(&manager.topic_registry, &topic, 0, 0);
+                                Self::create_topic_with_defaults(&manager.topic_registry, &topic);
                             }
 
                             let topic_registry = manager.topic_registry.read().unwrap();
@@ -161,7 +149,7 @@ impl SubscriptionManager {
                             // Если у нас не было такого топика, то добавим его в реестр,
                             // с настройками по умолчанию.
                             if !Self::topic_exists(&manager.topic_registry, &topic) {
-                                Self::create_topic(&manager.topic_registry, &topic, 0, 0)
+                                Self::create_topic_with_defaults(&manager.topic_registry, &topic)
                             }
 
                             let topic_registry = manager.topic_registry.read().unwrap();
@@ -251,10 +239,16 @@ impl SubscriptionManager {
         registry: &Arc<RwLock<TopicRegistry>>,
         topic: &str,
         retention_ttl: u64,
-        dedup_ttl: u64,
+        compaction_window: u64,
     ) {
         let mut writer = registry.write().unwrap();
-        writer.create_topic(topic.to_string(), retention_ttl, dedup_ttl);
+        writer.create_topic(topic.to_string(), retention_ttl, compaction_window);
+    }
+
+    fn create_topic_with_defaults(registry: &Arc<RwLock<TopicRegistry>>, topic: &str) {
+        let mut writer = registry.write().unwrap();
+        // По умолчанию не будем включать ни ретеншн, ни компакшн.
+        writer.create_topic(topic.to_string(), 0, 0);
     }
 
     fn message_is_out_of_date(message: &Message) -> bool {
