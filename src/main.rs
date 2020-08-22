@@ -4,10 +4,10 @@ mod topic_controller;
 mod topic_registry;
 
 // use crate::topic_registry::TopicRegistry;
-use crate::topic_controller::TopicRegistry;
-use tokio::sync::mpsc;
+use crate::topic_registry::TopicRegistry;
 use std::sync::{Arc, RwLock};
 use tokio::stream::StreamExt;
+use tokio::sync::mpsc;
 
 #[macro_use]
 extern crate log;
@@ -51,14 +51,14 @@ async fn process(
     let writer = tokio_util::codec::FramedWrite::new(write_half, codec);
 
     // Канал, для того, чтобы отправлять сообщения от клиента в управляющий компонент.
-    let (mut sender, receiver) = mpsc::channel(1000);
+    let (mut subscription_manager_channel, commands_receiver) = mpsc::channel(1000);
 
-    // Запись в сокет и работу с броадкастом мы отдадим в отдельную задачу
+    // Запись в сокет и управление подписками мы отдадим в отдельную задачу.
     tokio::spawn(async move {
         subscription_manager::SubscriptionManager::start_loop(
             peer,
             topic_registry,
-            receiver,
+            commands_receiver,
             writer,
         )
         .await
@@ -68,8 +68,11 @@ async fn process(
     while let Some(result) = reader.next().await {
         match result {
             Ok(frame) => {
-                let wrapped_frame = subscription_manager::MessageWrapper::from_frame(frame, peer);
-                sender.send(wrapped_frame).await.unwrap();
+                let wrapped_frame = subscription_manager::MessageWrapper::from_frame(frame);
+                subscription_manager_channel
+                    .send(wrapped_frame)
+                    .await
+                    .unwrap();
             }
             Err(e) => {
                 error!("error on decoding from socket; error = {:?}", e);
@@ -78,7 +81,11 @@ async fn process(
     }
 
     // Говорим управляющему модулю, что мы больше не работаем с клиентом.
-    let _ = sender.send(subscription_manager::MessageWrapper::from_frame(protocol::ZaichikFrame::CloseConnection {}, peer)).await;
+    let _ = subscription_manager_channel
+        .send(subscription_manager::MessageWrapper::from_frame(
+            protocol::ZaichikFrame::CloseConnection {},
+        ))
+        .await;
 
     debug!("[{}:{}] Stopped client", peer.ip(), peer.port());
 }

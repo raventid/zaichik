@@ -20,12 +20,8 @@ impl Client {
         Ok(Client { stream: framed })
     }
 
-    pub async fn read_message(&mut self) -> Option<protocol::ZaichikFrame> {
-        if let Some(Ok(frame)) = self.stream.next().await {
-            Some(frame)
-        } else {
-            None
-        }
+    pub async fn read_message(&mut self) -> Result<protocol::ZaichikFrame, std::io::Error> {
+        self.stream.next().await.unwrap()
     }
 
     pub async fn create_topic(
