@@ -37,7 +37,7 @@ impl TopicSettings {
         } else {
             Some(time::Duration::from_millis(compaction_window))
         };
-        let buffer_size = if buffer_size == 0 { 1000 } else { 0 } as usize;
+        let buffer_size = if buffer_size == 0 { 1000 } else { buffer_size } as usize;
 
         TopicSettings {
             retention_ttl,
@@ -64,7 +64,7 @@ impl TopicController {
         buffer_size: u32,
     ) -> TopicController {
         let settings = TopicSettings::new(retention_ttl, compaction_window, buffer_size as usize);
-        let (broadcast_sender, _) = broadcast::channel(buffer_size as usize);
+        let (broadcast_sender, _) = broadcast::channel(settings.buffer_size);
         let compaction_map = HashMap::new();
         let retained_buffer = Vec::new();
 
@@ -92,7 +92,7 @@ impl TopicController {
 
         // Проверяем не дубль ли это сообщения, если у нас включен compaction
         let is_duplicate = if let Some(compaction_window) = self.settings.compaction_window {
-            Self::check_duplicate_and_update_dedup_map(
+            Self::check_duplicate_and_update_compaction_map(
                 &message,
                 &mut self.compaction_map,
                 compaction_window,
@@ -140,15 +140,19 @@ impl TopicController {
     }
 
     fn clean_outdated_compaction_keys(&mut self) {
-        let outdated_keys = self
-            .compaction_map
-            .iter()
-            .filter(|(_key, time)| **time > time::Instant::now())
-            .map(|(key, _val)| key.to_string())
-            .collect::<Vec<_>>();
+        if self.settings.compaction_window.is_some() {
+            let outdated_keys = self
+                .compaction_map
+                .iter()
+                .filter(|(_key, time)| {
+                    time.add(self.settings.compaction_window.unwrap()) < time::Instant::now()
+                })
+                .map(|(key, _val)| key.to_string())
+                .collect::<Vec<_>>();
 
-        for key in outdated_keys {
-            self.compaction_map.remove(&key);
+            for key in outdated_keys {
+                self.compaction_map.remove(&key);
+            }
         }
     }
 
@@ -177,7 +181,7 @@ impl TopicController {
         stream::iter(retained_messages).chain(subscription)
     }
 
-    fn check_duplicate_and_update_dedup_map(
+    fn check_duplicate_and_update_compaction_map(
         message: &Message,
         compaction_map: &mut HashMap<String, time::Instant>,
         compaction_window: time::Duration,
@@ -219,6 +223,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_cleaning_compaction_map() {
+        let mut topic_controller_with_small_compaction_window =
+            TopicController::new("test".to_string(), 0, 1, 0);
+
+        let mut topic_controller_with_large_compaction_window =
+            TopicController::new("test1".to_string(), 0, 10_000, 0);
+
+        let in_past = time::Instant::now()
+            .checked_sub(time::Duration::from_millis(5000))
+            .unwrap();
+
+        let message1 = Message {
+            key: Some("same".to_string()),
+            payload: vec![1, 2, 3, 4],
+            received_at: in_past,
+            expires_at: None,
+        };
+
+        TopicController::check_duplicate_and_update_compaction_map(
+            &message1,
+            &mut topic_controller_with_small_compaction_window.compaction_map,
+            topic_controller_with_small_compaction_window
+                .settings
+                .compaction_window
+                .unwrap(),
+        );
+
+        TopicController::check_duplicate_and_update_compaction_map(
+            &message1,
+            &mut topic_controller_with_large_compaction_window.compaction_map,
+            topic_controller_with_large_compaction_window
+                .settings
+                .compaction_window
+                .unwrap(),
+        );
+
+        std::thread::sleep(time::Duration::from_millis(100));
+
+        topic_controller_with_small_compaction_window.clean_outdated_compaction_keys();
+        topic_controller_with_large_compaction_window.clean_outdated_compaction_keys();
+
+        assert!(topic_controller_with_small_compaction_window
+            .compaction_map
+            .is_empty());
+
+        assert!(!topic_controller_with_large_compaction_window
+            .compaction_map
+            .is_empty())
+    }
+
+    #[test]
     fn test_dedup_works() {
         let mut compaction_map = HashMap::new();
         let compaction_window = time::Duration::from_millis(5000);
@@ -240,12 +295,12 @@ mod tests {
             expires_at: None,
         };
 
-        assert!(!TopicController::check_duplicate_and_update_dedup_map(
+        assert!(!TopicController::check_duplicate_and_update_compaction_map(
             &message1,
             &mut compaction_map,
             compaction_window
         ));
-        assert!(TopicController::check_duplicate_and_update_dedup_map(
+        assert!(TopicController::check_duplicate_and_update_compaction_map(
             &message2,
             &mut compaction_map,
             compaction_window
@@ -273,17 +328,19 @@ mod tests {
             expires_at: None,
         };
 
-        assert!(!TopicController::check_duplicate_and_update_dedup_map(
+        assert!(!TopicController::check_duplicate_and_update_compaction_map(
             &message1,
             &mut compaction_map,
             compaction_window
         ));
-        std::thread::sleep(time::Duration::from_millis(500));
-        assert!(!TopicController::check_duplicate_and_update_dedup_map(
+
+        std::thread::sleep(time::Duration::from_millis(100));
+
+        assert!(!TopicController::check_duplicate_and_update_compaction_map(
             &message2,
             &mut compaction_map,
             compaction_window
-        )); // Второе сообщение не дулбикат, прошло много времени
+        )); // Второе сообщение не дубликат, прошло много времени
     }
 
     #[test]
@@ -307,12 +364,12 @@ mod tests {
             expires_at: None,
         };
 
-        assert!(!TopicController::check_duplicate_and_update_dedup_map(
+        assert!(!TopicController::check_duplicate_and_update_compaction_map(
             &message1,
             &mut compaction_map,
             compaction_window
         ));
-        assert!(!TopicController::check_duplicate_and_update_dedup_map(
+        assert!(!TopicController::check_duplicate_and_update_compaction_map(
             &message2,
             &mut compaction_map,
             compaction_window

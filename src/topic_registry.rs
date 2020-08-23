@@ -34,7 +34,7 @@ impl TopicRegistry {
         self.topics.get(&topic)
     }
 
-    pub fn get_topic(&self, topic: TopicName) -> Option<&RwLock<TopicController>> {
-        self.topics.get(&topic)
+    pub fn get_topic(&self, topic: &str) -> Option<&RwLock<TopicController>> {
+        self.topics.get(topic)
     }
 }

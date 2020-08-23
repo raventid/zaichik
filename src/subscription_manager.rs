@@ -155,8 +155,7 @@ impl SubscriptionManager {
                             }
 
                             let topic_registry = manager.topic_registry.read().unwrap();
-                            let topic_controller =
-                                topic_registry.get_topic(topic.to_string()).unwrap();
+                            let topic_controller = topic_registry.get_topic(&topic).unwrap();
 
                             // Так как топик контроллер должен поддерживать консистентность
                             // записи мы берем уникальный лок на запись.
