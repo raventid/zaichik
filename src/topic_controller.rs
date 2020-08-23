@@ -6,10 +6,7 @@ use tokio::sync::broadcast;
 
 use crate::topic_registry::TopicName;
 
-// Для сообщений в компоненте, который управляет подпиской мы будем использовать
-// отдельный внутренний тип Message. Он нам нужен для того, чтобы добавить чуть
-// больше гибкости и иметь возможность добавлять к сообщениям дополнительные поля или методы.
-// Это юнит хранения сообщения в MessageBuffer.
+// Сообщение в том в виде, в котором оно хранится в топике.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     pub key: Option<String>,
@@ -47,6 +44,8 @@ impl TopicSettings {
     }
 }
 
+// Компонент управляющий топиком.
+// Осуществляет запись в топик, контроль retention и compaction, выдает подписки.
 #[derive(Debug)]
 pub struct TopicController {
     name: TopicName,
