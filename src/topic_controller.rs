@@ -127,7 +127,7 @@ impl TopicController {
         // делать на каждом publish сообщения, но мы позволим себе этот
         // ход для упрощения. Также здесь мы добавим текущее сообщение в
         // retention_buffer.
-        self.clean_outdated_retentioned_messages();
+        self.clean_outdated_retained_messages();
 
         // Также, если мы используем compaction для топика, то мы не хотели
         // бы бесконечно увеличивать размер хэшмапы. Мы наивно будет удалять
@@ -156,7 +156,7 @@ impl TopicController {
         }
     }
 
-    fn clean_outdated_retentioned_messages(&mut self) {
+    fn clean_outdated_retained_messages(&mut self) {
         if self.settings.retention_ttl.is_some() {
             self.retained_buffer
                 .retain(|message| message.expires_at.unwrap() > time::Instant::now());
