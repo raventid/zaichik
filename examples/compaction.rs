@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     consumer.commit().await?;
     println!("Result is {:?}", message1);
 
-    // В выводе на экран можно увидеть, чо мы пропустили дублированные сообщения
+    // В выводе на экран можно увидеть, что мы пропустили дублированные сообщения
     // Result is Publish { topic: "hello", key: Some("key1"), payload: [109, 101, 115, 115, 97, 103, 101] }
     // Result is Publish { topic: "hello", key: Some("key2"), payload: [109, 101, 115, 115, 97, 103, 101, 49] }
 
