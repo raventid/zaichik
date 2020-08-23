@@ -110,7 +110,12 @@ Date:   Tue Aug 18 00:11:28 2020 +0300
 PORT=8889 cargo run --example echo
 ```
 
-Пример с двумя продьюсерами и потребителями.
+Пример с сохранением сообщения в топике.
 ```
-PORT=8889 cargo run --example two_clients
+PORT=8889 cargo run --example retention
+```
+
+Пример с удалением дубликатов по ключу.
+```
+PORT=8889 cargo run --example compaction  
 ```
